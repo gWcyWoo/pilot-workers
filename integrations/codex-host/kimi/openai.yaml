@@ -1,0 +1,4 @@
+interface:
+  display_name: "Kimi"
+  short_description: "用固定 Kimi K3 执行代码、调查、测试或审查"
+  default_prompt: "$kimi code"

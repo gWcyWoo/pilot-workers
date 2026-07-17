@@ -1,0 +1,11 @@
+# GLM 5.2 via Zhipu's official OpenCode-compatible Coding API.
+# Requires a Zhipu Coding Plan API key.
+# Docs: https://docs.bigmodel.cn/cn/guide/develop/opencode
+
+key: glm
+provider_id: glm-worker
+model_id: glm-5.2
+base_url: https://open.bigmodel.cn/api/coding/paas/v4
+display_name: GLM 5.2 Worker
+context_tokens: 1000000
+output_tokens: 131072

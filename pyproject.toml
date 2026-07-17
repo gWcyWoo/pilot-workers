@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "pilot-workers"
+version = "0.1.0"
+description = "Dispatch bounded tasks to isolated LLM workers (GLM, Kimi, and more)"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+yaml = ["pyyaml>=6.0"]
+
+[project.scripts]
+pilot-workers = "pilot_workers.cli.run:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
