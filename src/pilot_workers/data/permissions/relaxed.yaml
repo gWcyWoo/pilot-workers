@@ -1,0 +1,10 @@
+# Relaxed: allows network tools and commands across all modes.
+# Use for trusted environments where workers need web access.
+
+_all:
+  shell:
+    "curl *": allow
+    "wget *": allow
+  tools:
+    webfetch: allow
+    websearch: allow

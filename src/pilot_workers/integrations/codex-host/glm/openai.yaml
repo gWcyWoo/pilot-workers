@@ -1,0 +1,4 @@
+interface:
+  display_name: "GLM"
+  short_description: "Run code, investigation, testing, or review on the fixed GLM 5.2"
+  default_prompt: "$glm code"

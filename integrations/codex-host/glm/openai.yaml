@@ -1,4 +1,0 @@
-interface:
-  display_name: "GLM"
-  short_description: "用固定 GLM 5.2 执行代码、调查、测试或审查"
-  default_prompt: "$glm code"

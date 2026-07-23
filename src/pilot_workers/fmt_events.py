@@ -10,7 +10,7 @@ Conventions kept from the previous run.sh/fmt.py pipeline so existing habits
 and monitors keep working:
 - fixed per-provider live path `<logs>/<provider>/latest.log` for `tail -f`;
 - every line tagged `|<PID>` so parallel workers stay distinguishable;
-- `== 完成` on success/exit and `!! ` on errors (Monitor greps these);
+- `== DONE` on success/exit and `!! ` on errors (Monitor greps these);
 - append-only writes, rotate by rename above 8 MB (BSD `tail -F` follows
   renames, not in-place truncation);
 - per-run archives, pruned to the newest 20 per provider.
@@ -30,21 +30,30 @@ Log format (designed for human scanning in `tail -f`):
     HH:MM:SS |PID !! Tool:
         bash curl http://x → denied by permission rule
 
-    HH:MM:SS |PID == 完成 exit=0 session=ses_xxx ==
+    HH:MM:SS |PID == DONE exit=0 session=ses_xxx ==
 
 Rules: every record is separated by a blank line; header line carries the
 timestamp/PID/marker, content follows on the next line at a 4-space indent
 (`name input → first informative output line`); read/edit/write show no
 output (the path says it all); paths are shortened (`~`, last 3 segments);
 newlines never leak into a content line.
+
+Engine-specific event shape translation (tool_use/text/reasoning) is owned
+by the runner adapter (see ``runners/opencode_runner.py``). This module now
+renders two kinds of input:
+
+- ``write_event(dict)`` for pilot-workers-owned events (worker_runner.*).
+- ``write_unified(UnifiedEvent)`` for engine events already translated by a
+  ``Runner.parse_events`` implementation.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-import json
 from pathlib import Path
 from typing import Any
+
+from pilot_workers.runners.base import UnifiedEvent
 
 ROTATE_BYTES = 8_000_000
 KEEP_ARCHIVES = 20
@@ -70,50 +79,13 @@ def _indent_multiline(text: str, limit: int) -> str:
     return trimmed.replace("\n", "\n" + INDENT)
 
 
-def _short_path(value: str) -> str:
-    """~ for home, and keep only the last 3 segments of long paths."""
-    home = str(Path.home())
-    if value.startswith(home):
-        value = "~" + value[len(home):]
-    if len(value) > 64 and "/" in value:
-        parts = value.split("/")
-        if len(parts) > 4:
-            value = "…/" + "/".join(parts[-3:])
-    return value
-
-
-def _first_line(value: str, limit: int) -> str:
-    """First informative line, never a raw newline. Skips XML-ish wrapper lines."""
-    for line in str(value).splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith("<") and line.endswith(">"):
-            continue  # <path>…</path> / <type>file</type> / <content> wrappers
-        if line.startswith("/") and " " not in line:
-            line = _short_path(line)
-        return _trim(line, limit)
-    return ""
-
-
-def _tool_input_brief(tool: str, tool_input: dict[str, Any]) -> str:
-    for key in ("command", "filePath", "pattern", "path", "query", "url"):
-        value = tool_input.get(key)
-        if value:
-            text = str(value)
-            if key in ("filePath", "path"):
-                text = _short_path(text)
-            return _trim(text.replace("\n", " "), INPUT_LIMIT)
-    return _trim(json.dumps(tool_input, ensure_ascii=False), INPUT_LIMIT) if tool_input else ""
-
-
-# Tools whose output is a file dump or a plain confirmation — the input path
-# already says everything; echoing the output only adds noise.
-SILENT_OUTPUT_TOOLS = {"read", "edit", "write", "list", "todowrite"}
-
-
 def render_event(event: dict[str, Any]) -> list[str]:
-    """Render one event into log lines. Returns empty list = skip this event."""
+    """Render one pilot-workers-owned event into log lines.
+
+    Only ``worker_runner.*`` event types are handled here. Engine-native
+    events (tool_use/text/reasoning) are translated into UnifiedEvent by the
+    runner adapter and rendered via ``FmtWriter.write_unified``.
+    """
     kind = event.get("type")
 
     if kind == "worker_runner.started":
@@ -130,7 +102,7 @@ def render_event(event: dict[str, Any]) -> list[str]:
 
     if kind == "worker_runner.summary":
         exit_code = event.get("exit_code")
-        marker = "== 完成" if exit_code == 0 else "!! 失败"
+        marker = "== DONE" if exit_code == 0 else "!! FAILED"
         flags = "".join(
             f" [{name}]"
             for name in ("timed_out", "idle_timed_out", "interrupted")
@@ -138,28 +110,37 @@ def render_event(event: dict[str, Any]) -> list[str]:
         )
         return [f"{marker} exit={exit_code}{flags} session={event.get('session_id')} =="]
 
-    part = event.get("part") or {}
+    return []
 
-    if kind == "tool_use":
-        state = part.get("state") or {}
-        status = state.get("status")
-        tool = part.get("tool", "?")
-        brief = _tool_input_brief(tool, state.get("input") or {})
 
-        if status == "error":
-            reason = _first_line(state.get("error") or "", INPUT_LIMIT)
-            return ["!! Tool:", f"{INDENT}{tool} {brief} → {reason}"]
-        if status == "completed":
-            if tool in SILENT_OUTPUT_TOOLS:
-                return ["Tool:", f"{INDENT}{tool} {brief}"]
-            output_brief = _first_line(state.get("output") or "", INPUT_LIMIT)
-            if output_brief:
-                return ["Tool:", f"{INDENT}{tool} {brief} → {output_brief}"]
-            return ["Tool:", f"{INDENT}{tool} {brief}"]
+def render_unified(ev: UnifiedEvent) -> list[str]:
+    """Render one UnifiedEvent into log lines.
+
+    Behaviour matches the former ``render_event`` tool_use / reasoning / text
+    branches exactly (those branches have been moved here from the dict
+    rendering path, with input/output briefs supplied by the runner adapter
+    rather than re-parsed locally).
+    """
+    if ev.kind == "tool":
+        tool = ev.tool
+        if tool is None:
+            return []
+        brief = tool.input_brief
+        if tool.status == "error":
+            reason = (tool.error or "").strip().splitlines()
+            reason_text = reason[0].strip() if reason else ""
+            reason_trimmed = _trim(reason_text, INPUT_LIMIT)
+            return ["!! Tool:", f"{INDENT}{tool.name} {brief} → {reason_trimmed}"]
+        if tool.status == "completed":
+            if tool.silent_output:
+                return ["Tool:", f"{INDENT}{tool.name} {brief}"]
+            if tool.output_brief:
+                return ["Tool:", f"{INDENT}{tool.name} {brief} → {tool.output_brief}"]
+            return ["Tool:", f"{INDENT}{tool.name} {brief}"]
         return []
 
-    if kind == "reasoning":
-        text = (part.get("text") or "").strip()
+    if ev.kind == "reasoning":
+        text = (ev.text or "").strip()
         if not text:
             return []
         content = _indent_multiline(text, TEXT_LIMIT)
@@ -168,12 +149,13 @@ def render_event(event: dict[str, Any]) -> list[str]:
             f"{INDENT}{content}",
         ]
 
-    if kind == "text":
-        text = (part.get("text") or "").strip()
+    if ev.kind == "text":
+        text = (ev.text or "").strip()
         if not text:
             return []
         return [f"💬 {_trim(text, TEXT_LIMIT)}"]
 
+    # step / error / session: no dedicated rendered line today.
     return []
 
 
@@ -206,6 +188,11 @@ class FmtWriter:
 
     def write_event(self, event: dict[str, Any]) -> None:
         lines = render_event(event)
+        if lines:
+            self.write_lines(lines)
+
+    def write_unified(self, ev: UnifiedEvent) -> None:
+        lines = render_unified(ev)
         if lines:
             self.write_lines(lines)
 

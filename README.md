@@ -15,9 +15,9 @@ Dispatch bounded tasks to isolated LLM workers. Your main AI agent (Claude, Code
 
 ```bash
 # 1. Install the pinned OpenCode runtime
-bash scripts/install_runtime.sh
+pilot-workers runtime install
 
-# 2. Add a provider (YAML files in providers/)
+# 2. Add a provider (YAML files in src/pilot_workers/data/providers/)
 # GLM and Kimi are included; add your own by copying the template
 
 # 3. Configure credentials (interactive, key never displayed)
@@ -36,7 +36,7 @@ python3 -m pilot_workers.cli.run \
 
 ## Adding a new provider
 
-Drop a YAML file in `providers/`:
+Drop a YAML file in `data/providers/` (inside the package):
 
 ```yaml
 key: deepseek
@@ -55,8 +55,8 @@ Then `python3 -m pilot_workers.credentials deepseek` and you're done.
 The **host** is whatever AI agent acts as the planner — Claude, Codex, Gemini, GLM itself, or anything that can write a task file and call the CLI.
 
 `integrations/` has ready-made configs for current hosts:
-- **`claude-host/`**: 8 agents + 8 slash commands (`/glm:code`, `/kimi:explore`, etc.)
-- **`codex-host/`**: `$glm` / `$kimi` skill entry points
+- **`claude-host/`**: 12 agents + 8 slash commands (`/glm:code`, `/kimi:explore`, etc.)
+- **`codex-host/`**: `$glm` / `$kimi` / `$ds` skill entry points
 
 Adding a new host: create `integrations/<name>-host/`, put whatever config your host needs, point it at `python3 -m pilot_workers.cli.run`. See `integrations/README.md`.
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Provider registry: loads provider definitions from YAML files.
 
-The single source of truth for provider routing is the `providers/` directory
-at the project root. Each `.yaml` file defines one provider. Adding a new
-model only requires dropping a new YAML file — no Python changes.
+The single source of truth for provider routing is the `data/providers/`
+directory inside this package. Each `.yaml` file defines one provider.
+Adding a new model only requires dropping a new YAML file — no Python changes.
 
-The pinned runner version and shared path helpers also live here so that
-every other module imports facts from one place.
+The shared path helpers also live here so that every other module imports
+facts from one place.
 """
 
 from __future__ import annotations
@@ -22,11 +22,9 @@ except ImportError:
     yaml = None  # type: ignore[assignment]
 
 
-PINNED_OPENCODE_VERSION = "1.18.3"
 MAX_TASK_BYTES = 512_000
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-PROVIDERS_DIR = PROJECT_ROOT / "providers"
+PROVIDERS_DIR = Path(__file__).resolve().parent / "data" / "providers"
 
 
 @dataclass(frozen=True)
@@ -38,6 +36,8 @@ class Provider:
     display_name: str
     context_tokens: int
     output_tokens: int
+    permissions: str | None = None
+    runner: str = "opencode"
 
     @property
     def model(self) -> str:
@@ -87,6 +87,8 @@ def load_providers(providers_dir: Path | None = None) -> dict[str, Provider]:
             display_name=data["display_name"],
             context_tokens=int(data["context_tokens"]),
             output_tokens=int(data["output_tokens"]),
+            permissions=data.get("permissions") or None,
+            runner=data.get("runner") or "opencode",
         )
         if provider.key in providers:
             raise RuntimeError(f"duplicate provider key: {provider.key}")
@@ -124,7 +126,6 @@ def profile_paths(provider: Provider) -> dict[str, Path]:
         "data": root / "data",
         "state": root / "state",
         "cache": root / "cache",
-        "auth": root / "data" / "opencode" / "auth.json",
     }
 
 
@@ -134,19 +135,3 @@ def logs_root(provider: Provider) -> Path:
 
 def worktrees_root() -> Path:
     return workers_root() / "worktrees"
-
-
-def runtime_binary() -> Path:
-    return (
-        pilot_home()
-        / "worker-runtime"
-        / "opencode"
-        / PINNED_OPENCODE_VERSION
-        / "node_modules"
-        / ".bin"
-        / "opencode"
-    )
-
-
-if __name__ == "__main__":
-    print(PINNED_OPENCODE_VERSION)

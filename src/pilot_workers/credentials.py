@@ -9,12 +9,14 @@ import json
 import os
 import tempfile
 
-from pilot_workers.providers import PROVIDERS, profile_paths, workers_root
+from pilot_workers.providers import PROVIDERS, workers_root
+from pilot_workers.runners import get_runner
 
 
 def credential_status(provider_key: str) -> dict[str, object]:
     provider = PROVIDERS[provider_key]
-    path = profile_paths(provider)["auth"]
+    runner = get_runner(provider.runner)
+    path = runner.credential_path(provider)
     configured = False
     secure_mode = False
     error: str | None = None
@@ -22,17 +24,17 @@ def credential_status(provider_key: str) -> dict[str, object]:
         secure_mode = (path.stat().st_mode & 0o077) == 0
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-            entry = payload.get(provider.provider_id, {})
-            configured = (
-                isinstance(entry, dict)
-                and entry.get("type") == "api"
-                and isinstance(entry.get("key"), str)
-                and bool(entry["key"].strip())
-            )
+            try:
+                key = runner.parse_credential(provider, payload)
+            except (RuntimeError, TypeError, AttributeError) as exc:
+                error = str(exc)
+                key = ""
+            configured = bool(key and key.strip())
         except (OSError, json.JSONDecodeError) as exc:
             error = str(exc)
     return {
         "provider": provider_key,
+        "runner": provider.runner,
         "provider_id": provider.provider_id,
         "configured": configured,
         "secure_mode": secure_mode,
@@ -54,12 +56,13 @@ def ensure_private_directories(destination) -> None:
 
 def configure(provider_key: str) -> None:
     provider = PROVIDERS[provider_key]
+    runner = get_runner(provider.runner)
     key = getpass.getpass(f"{provider_key} API key (input hidden): ").strip()
     if not key:
         raise SystemExit(f"error: empty {provider_key} API key; no file was changed")
-    destination = profile_paths(provider)["auth"]
+    destination = runner.credential_path(provider)
     ensure_private_directories(destination)
-    payload = {provider.provider_id: {"type": "api", "key": key}}
+    payload = runner.credential_payload(provider, key)
     temporary_name: str | None = None
     try:
         with tempfile.NamedTemporaryFile(

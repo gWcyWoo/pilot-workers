@@ -17,7 +17,7 @@ from pathlib import Path
 import subprocess
 import time
 
-import providers
+from pilot_workers import providers
 
 
 def _run_pairs(logs_dir: Path) -> list[list[Path]]:

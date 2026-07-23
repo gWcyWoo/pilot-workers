@@ -1,6 +1,0 @@
-interface:
-  display_name: "OpenCode Worker Backend"
-  short_description: "供 $glm 和 $kimi 共用的内部隔离运行后端"
-  default_prompt: "Use $dispatch-opencode-workers only to debug the shared worker backend."
-policy:
-  allow_implicit_invocation: false

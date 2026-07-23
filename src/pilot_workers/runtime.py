@@ -14,6 +14,7 @@ import time
 from typing import Any, TextIO
 
 from pilot_workers.providers import Provider, profile_paths
+from pilot_workers.runners.base import Runner, UnifiedEvent
 
 SAFE_ENV_KEYS = (
     "HOME", "USER", "LOGNAME", "SHELL", "PATH", "TMPDIR",
@@ -25,6 +26,15 @@ SAFE_ENV_KEYS = (
     "BUN_INSTALL", "PNPM_HOME",
 )
 
+# Env keys a runner must never override: neutral SAFE_ENV_KEYS already owned
+# by this layer, the XDG_*_HOME dirs (also owned here), plus the NO_COLOR / CI
+# flags the runtime sets to keep worker output deterministic.
+_PROTECTED_KEYS = frozenset(SAFE_ENV_KEYS) | frozenset(
+    k for k in ("NO_COLOR", "CI")
+) | frozenset(
+    f"XDG_{d}_HOME" for d in ("CONFIG", "DATA", "STATE", "CACHE")
+)
+
 HEARTBEAT_SECONDS = 60
 TERMINATE_GRACE_SECONDS = 10
 
@@ -34,7 +44,13 @@ def ensure_private_directory(path: Path) -> None:
     path.chmod(0o700)
 
 
-def build_environment(provider: Provider, config: dict[str, Any]) -> dict[str, str]:
+def build_environment(provider: Provider, runner_env: dict[str, str]) -> dict[str, str]:
+    """Compose the child process environment.
+
+    Neutral concerns (SAFE_ENV_KEYS whitelist + XDG dirs) are owned here; the
+    runner-specific variables come from ``runner.runner_environment`` via the
+    ``runner_env`` argument and are merged unchanged.
+    """
     paths = profile_paths(provider)
     for name in ("root", "config", "data", "state", "cache"):
         ensure_private_directory(paths[name])
@@ -44,24 +60,18 @@ def build_environment(provider: Provider, config: dict[str, Any]) -> dict[str, s
         "XDG_DATA_HOME": str(paths["data"]),
         "XDG_STATE_HOME": str(paths["state"]),
         "XDG_CACHE_HOME": str(paths["cache"]),
-        "OPENCODE_CONFIG_DIR": str(paths["config"] / "opencode"),
-        "OPENCODE_CONFIG_CONTENT": json.dumps(config, separators=(",", ":")),
-        "OPENCODE_DISABLE_AUTOUPDATE": "1",
-        "OPENCODE_AUTO_SHARE": "false",
-        "OPENCODE_DISABLE_DEFAULT_PLUGINS": "1",
-        "OPENCODE_DISABLE_LSP_DOWNLOAD": "1",
-        "OPENCODE_DISABLE_MODELS_FETCH": "1",
-        "OPENCODE_DISABLE_CLAUDE_CODE": "1",
-        "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT": "1",
-        "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS": "1",
         "NO_COLOR": "1",
         "CI": "1",
     })
+    # Drop any runner-supplied entry that would shadow a neutral key — those
+    # are owned by this layer and must remain deterministic.
+    filtered = {k: v for k, v in runner_env.items() if k not in _PROTECTED_KEYS}
+    env.update(filtered)
     return env
 
 
-def credential_key(provider: Provider) -> str:
-    path = profile_paths(provider)["auth"]
+def credential_key(provider: Provider, runner: Runner) -> str:
+    path = runner.credential_path(provider)
     if not path.is_file():
         raise RuntimeError(f"credential missing for {provider.key}; run: pilot-workers configure {provider.key}")
     if path.stat().st_mode & 0o077:
@@ -70,33 +80,30 @@ def credential_key(provider: Provider) -> str:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"cannot read credential from {path}: {exc}") from exc
-    entry = payload.get(provider.provider_id)
-    if not isinstance(entry, dict) or entry.get("type") != "api":
-        raise RuntimeError(f"credential file lacks API auth for {provider.provider_id}: {path}")
-    key = entry.get("key")
-    if not isinstance(key, str) or not key.strip():
-        raise RuntimeError(f"credential is empty for {provider.provider_id}: {path}")
-    return key
+    return runner.parse_credential(provider, payload)
 
 
-def credential_metadata(provider: Provider) -> dict[str, Any]:
-    path = profile_paths(provider)["auth"]
+def credential_metadata(provider: Provider, runner: Runner) -> dict[str, Any]:
+    path = runner.credential_path(provider)
     configured = False
     secure_mode = False
     if path.is_file():
         secure_mode = (path.stat().st_mode & 0o077) == 0
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-            entry = payload.get(provider.provider_id)
-            configured = (
-                isinstance(entry, dict)
-                and entry.get("type") == "api"
-                and isinstance(entry.get("key"), str)
-                and bool(entry["key"].strip())
-            )
+            configured = _looks_configured(provider, runner, payload)
         except (OSError, json.JSONDecodeError):
             configured = False
     return {"configured": configured, "secure_mode": secure_mode, "path": str(path)}
+
+
+def _looks_configured(provider: Provider, runner: Runner, payload: Any) -> bool:
+    """Best-effort 'has a usable API key' check; never raises."""
+    try:
+        key = runner.parse_credential(provider, payload)
+    except (RuntimeError, TypeError, AttributeError):
+        return False
+    return bool(key.strip())
 
 
 def create_detached_worktree(workdir: Path, worktree_parent: Path) -> Path:
@@ -133,20 +140,6 @@ def create_detached_worktree(workdir: Path, worktree_parent: Path) -> Path:
     return target / relative
 
 
-def session_ids(value: Any) -> list[str]:
-    found: list[str] = []
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if key in {"sessionID", "sessionId", "session_id"} and isinstance(item, str):
-                found.append(item)
-            else:
-                found.extend(session_ids(item))
-    elif isinstance(value, list):
-        for item in value:
-            found.extend(session_ids(item))
-    return found
-
-
 def open_private_text(path: Path) -> TextIO:
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     return os.fdopen(descriptor, "w", encoding="utf-8")
@@ -178,12 +171,22 @@ class _SafeRenderer:
     def event(self, event: dict[str, Any]) -> None:
         self._guard(lambda: self._writer.write_event(event))
 
-    def raw_line(self, line: str) -> None:
+    def raw_line(self, line: str, runner: Runner | None) -> None:
         def action() -> None:
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 return
+            if not isinstance(event, dict):
+                return
+            if runner is None:
+                # Without a runner we can only render self-owned events.
+                self._writer.write_event(event)
+                return
+            for ev in runner.parse_events(event):
+                self._writer.write_unified(ev)
+            # Self-owned events (worker_runner.*) live outside parse_events;
+            # also render them in case the line is one.
             self._writer.write_event(event)
         self._guard(action)
 
@@ -195,6 +198,7 @@ def run_process(
     command: list[str], env: dict[str, str], task: str,
     log_path: Path, stderr_path: Path, secret: str,
     renderer: Any = None, timeout_s: int = 0, idle_timeout_s: int = 0,
+    runner: Runner | None = None,
 ) -> RunResult:
     safe_renderer = _SafeRenderer(renderer)
     result = RunResult(exit_code=1, session_id=None)
@@ -231,14 +235,19 @@ def run_process(
                 line = redact(raw_line)
                 stdout_log.write(line); stdout_log.flush()
                 sys.stdout.write(line); sys.stdout.flush()
-                safe_renderer.raw_line(line)
+                safe_renderer.raw_line(line, runner)
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                ids = session_ids(event)
-                if ids:
-                    result.session_id = ids[-1]
+                if not isinstance(event, dict) or runner is None:
+                    continue
+                try:
+                    for ev in runner.parse_events(event):
+                        if ev.kind == "session" and ev.session_id:
+                            result.session_id = ev.session_id
+                except Exception:
+                    pass
 
         def consume_stderr() -> None:
             assert process.stderr is not None

@@ -1,0 +1,9 @@
+# Strict: tightens code mode to block file deletion and move.
+# Use when workers should only add/edit, never reorganize.
+
+code:
+  shell:
+    "rm *": deny
+    "mv *": deny
+    "chmod *": deny
+    "chown *": deny

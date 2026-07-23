@@ -12,7 +12,7 @@ import secrets
 import sys
 
 from pilot_workers import fmt_events, policy, providers, runtime
-from pilot_workers.runners.opencode import verify_binary
+from pilot_workers.runners import get_runner
 
 
 DEFAULT_TIMEOUT_S = 3600
@@ -45,12 +45,16 @@ def validate_mode_arguments(args: argparse.Namespace) -> None:
         raise RuntimeError("resume the previously reported work directory; do not create a new worktree")
 
 
-def dry_run_summary(provider: providers.Provider, mode: str, workdir: Path) -> dict:
-    config = policy.build_config(provider, mode)
+def dry_run_summary(provider: providers.Provider, mode: str, workdir: Path, *, permission_profile: str | None = None) -> dict:
+    runner = get_runner(provider.runner)
+    config = runner.build_config(provider, mode, permission_profile=permission_profile)
     paths = providers.profile_paths(provider)
+    effective_profile = permission_profile or provider.permissions
+    bp = runner.binary_path()
     return {
         "type": "worker_runner.dry_run",
         "provider": provider.key,
+        "runner": provider.runner,
         "provider_id": provider.provider_id,
         "endpoint": provider.base_url,
         "model": provider.model,
@@ -59,10 +63,11 @@ def dry_run_summary(provider: providers.Provider, mode: str, workdir: Path) -> d
         "workdir": str(workdir),
         "sharing": config["share"],
         "enabled_providers": config["enabled_providers"],
+        "permission_profile": effective_profile,
         "profile": str(paths["root"]),
-        "credential": runtime.credential_metadata(provider),
-        "runtime": str(providers.runtime_binary()),
-        "runtime_present": providers.runtime_binary().is_file(),
+        "credential": runtime.credential_metadata(provider, runner),
+        "runtime": str(bp) if bp else None,
+        "runtime_present": bp.is_file() if bp else False,
     }
 
 
@@ -78,6 +83,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--worktree", action="store_true", help="Create a detached worktree from HEAD.")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S)
     parser.add_argument("--idle-timeout", type=int, default=DEFAULT_IDLE_TIMEOUT_S)
+    parser.add_argument("--permissions", help="Permission profile name (overrides provider YAML).")
     parser.add_argument("--dry-run", action="store_true", help="Show routing metadata without invoking a model.")
     return parser.parse_args(argv)
 
@@ -95,34 +101,25 @@ def main(argv: list[str] | None = None) -> int:
         task = load_task(args)
 
         if args.dry_run:
-            print(json.dumps(dry_run_summary(provider, args.mode, workdir), indent=2))
+            print(json.dumps(dry_run_summary(provider, args.mode, workdir, permission_profile=args.permissions), indent=2))
             return 0
 
-        binary = verify_binary()
-        secret = runtime.credential_key(provider)
+        runner = get_runner(provider.runner)
+        binary = runner.resolve_binary()
+        secret = runtime.credential_key(provider, runner)
         if args.worktree:
             workdir = runtime.create_detached_worktree(workdir, providers.worktrees_root())
 
-        config = policy.build_config(provider, args.mode)
-        env = runtime.build_environment(provider, config)
+        config = runner.build_config(provider, args.mode, permission_profile=args.permissions)
+        env = runtime.build_environment(provider, runner.runner_environment(provider, config))
         logs = providers.logs_root(provider)
         runtime.ensure_private_directory(logs)
         run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(4)}"
         log_path = logs / f"{run_id}.jsonl"
         stderr_path = logs / f"{run_id}.stderr.log"
         agent = policy.MODE_TO_AGENT[args.mode]
-        prompt = f"<worker-task mode=\"{args.mode}\">\n{task}\n</worker-task>"
-        command = [
-            binary, "--pure", "run",
-            "--model", provider.model,
-            "--agent", agent,
-            "--format", "json",
-            "--thinking",
-            "--title", f"pilot-worker-{args.mode}-{run_id}",
-            "--dir", str(workdir),
-        ]
-        if args.session:
-            command.extend(["--session", args.session])
+        prompt = runner.format_task_input(task, args.mode)
+        command = runner.build_command(binary, provider, args.mode, workdir, run_id, args.session)
 
         try:
             renderer = fmt_events.FmtWriter(logs, provider.key, run_id, os.getpid())
@@ -133,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         started = {
             "type": "worker_runner.started",
             "provider": provider.key,
+            "runner": provider.runner,
             "model": provider.model,
             "mode": args.mode,
             "agent": agent,
@@ -155,11 +153,13 @@ def main(argv: list[str] | None = None) -> int:
         result = runtime.run_process(
             command, env, prompt, log_path, stderr_path, secret,
             renderer=renderer, timeout_s=args.timeout, idle_timeout_s=args.idle_timeout,
+            runner=runner,
         )
         secret = ""
         summary = {
             "type": "worker_runner.summary",
             "provider": provider.key,
+            "runner": provider.runner,
             "model": provider.model,
             "mode": args.mode,
             "agent": agent,

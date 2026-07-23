@@ -1,0 +1,11 @@
+# DeepSeek V4 Pro via DeepSeek's official OpenAI-compatible API.
+# Requires a DeepSeek API key.
+# Docs: https://api-docs.deepseek.com/
+
+key: ds
+provider_id: ds-worker
+model_id: deepseek-v4-pro
+base_url: https://api.deepseek.com/v1
+display_name: DeepSeek V4 Pro Worker
+context_tokens: 1000000
+output_tokens: 384000

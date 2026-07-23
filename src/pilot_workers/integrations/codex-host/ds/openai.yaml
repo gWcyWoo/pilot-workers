@@ -1,0 +1,4 @@
+interface:
+  display_name: "DeepSeek"
+  short_description: "Collaborate with DeepSeek V4 Pro on design, implementation, investigation, testing, and review"
+  default_prompt: "$ds code"

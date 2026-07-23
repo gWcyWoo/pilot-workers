@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mode policy: agents, shell permission rules, prompts, and runner config.
 
-Permission-matching facts (read from the pinned OpenCode 1.18.3 binary,
+Permission-matching facts (read from the pinned OpenCode binary,
 confirmed by live probes):
 
 - Resolution is LAST-MATCH-WINS (`findLast` over insertion-ordered rules).
@@ -20,7 +20,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+try:
+    import yaml  # type: ignore[import-untyped]
+except ImportError:
+    yaml = None  # type: ignore[assignment]
+
 from pilot_workers.providers import Provider
+
+PERMISSIONS_DIR = Path(__file__).resolve().parent / "data" / "permissions"
+
+VALID_MODES = ("code", "explore", "test", "review")
 
 MODE_TO_AGENT = {
     "code": "worker-code",
@@ -29,6 +38,8 @@ MODE_TO_AGENT = {
     "review": "worker-review",
     "resume": "worker-code",
 }
+
+STEPS_BY_MODE = {"code": 120, "resume": 120, "review": 120, "explore": 80, "test": 80}
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
@@ -79,6 +90,8 @@ def readonly_shell_permissions() -> dict[str, str]:
         "*": "deny",
         "pwd": "allow",
         "ls*": "allow",
+        "cat *": "allow",
+        "echo *": "allow",
         "find *": "allow",
         "rg *": "allow",
         "grep *": "allow",
@@ -89,11 +102,14 @@ def readonly_shell_permissions() -> dict[str, str]:
         "wc *": "allow",
         "file *": "allow",
         "stat *": "allow",
+        "npx tsc*": "allow",
         "git status*": "allow",
         "git diff*": "allow",
         "git log*": "allow",
         "git show*": "allow",
         "git blame*": "allow",
+        "git branch*": "allow",
+        "git grep*": "allow",
         "git rev-parse*": "allow",
         "git ls-files*": "allow",
     }
@@ -124,6 +140,7 @@ def test_shell_permissions() -> dict[str, str]:
             "python -m pytest*": "allow",
             "go test*": "allow",
             "cargo test*": "allow",
+            "npx vitest run*": "allow",
             "dart test*": "allow",
             "flutter test*": "allow",
             "make test*": "allow",
@@ -176,10 +193,70 @@ def agent_permissions(mode: str) -> dict[str, Any]:
     }
 
 
-def build_config(provider: Provider, mode: str) -> dict[str, Any]:
+def load_permission_profile(name: str) -> dict[str, Any]:
+    """Load a permission profile YAML from the permissions/ directory."""
+    path = PERMISSIONS_DIR / f"{name}.yaml"
+    if not path.is_file():
+        raise RuntimeError(f"permission profile not found: {path}")
+    if yaml is None:
+        raise RuntimeError(
+            f"pyyaml is required for custom permission profiles; "
+            f"install it with: pip install pyyaml"
+        )
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise RuntimeError(f"permission profile must be a YAML mapping: {path}")
+    for key in data:
+        if key != "_all" and key not in VALID_MODES:
+            raise RuntimeError(
+                f"permission profile has unknown section '{key}' "
+                f"(expected _all or one of {VALID_MODES}): {path}"
+            )
+    return data
+
+
+def _merge_permissions(
+    base: dict[str, Any], profile: dict[str, Any] | None, mode: str,
+) -> dict[str, Any]:
+    """Merge a permission profile into base agent permissions.
+
+    Shell rules from the profile are appended after the base rules
+    (last-match-wins in OpenCode). Tool rules overwrite base values.
+    """
+    if profile is None:
+        return base
+
+    sections = []
+    if "_all" in profile:
+        sections.append(profile["_all"])
+    effective_mode = "code" if mode == "resume" else mode
+    if effective_mode in profile:
+        sections.append(profile[effective_mode])
+    if not sections:
+        return base
+
+    result = dict(base)
+    bash_rules = dict(result.get("bash", {}))
+
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        for pattern, action in (section.get("shell") or {}).items():
+            bash_rules[pattern] = action
+        for tool, action in (section.get("tools") or {}).items():
+            result[tool] = action
+
+    result["bash"] = bash_rules
+    return result
+
+
+def build_config(provider: Provider, mode: str, *, permission_profile: str | None = None) -> dict[str, Any]:
+    profile_name = permission_profile or provider.permissions
+    profile = load_permission_profile(profile_name) if profile_name else None
     agent_name = MODE_TO_AGENT[mode]
     prompt_mode = "code" if mode == "resume" else mode
     model = provider.model
+    permissions = _merge_permissions(agent_permissions(mode), profile, mode)
     return {
         "$schema": "https://opencode.ai/config.json",
         "autoupdate": False,
@@ -210,9 +287,9 @@ def build_config(provider: Provider, mode: str) -> dict[str, Any]:
                 "description": f"Isolated {prompt_mode} worker controlled by the main planner",
                 "mode": "primary",
                 "model": model,
-                "steps": 80,
+                "steps": STEPS_BY_MODE[mode],
                 "prompt": load_prompt(mode),
-                "permission": agent_permissions(mode),
+                "permission": permissions,
             }
         },
     }
