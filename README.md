@@ -67,7 +67,10 @@ pilot-workers <subcommand> [args]
                      status [--json]
                      status <host>
   credentials      Configure isolated worker credentials.
-  maintain         Worker log and worktree lifecycle tools.
+  maintain         Worker log, run-sandbox, and worktree lifecycle tools.
+                     maintain logs --older-than-days N
+                     maintain runs --older-than-days N [--keep M]
+                     maintain worktrees list|remove <path>
 ```
 
 ## Adding a new provider
@@ -113,7 +116,7 @@ See [CLAUDE.md](CLAUDE.md) for the current architecture, module reference, and c
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest    # 289 tests, all offline
+.venv/bin/pytest    # 297 tests, all offline
 ```
 
 ## License

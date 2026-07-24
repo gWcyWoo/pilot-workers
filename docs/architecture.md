@@ -180,7 +180,7 @@ The skill is a playbook, not CLI syntax docs: it carries the dispatch doctrine (
 
 ## Testing
 
-289 pytest tests, all offline:
+297 pytest tests, all offline:
 - No network calls, no real `~/.claude` or `~/.codex` access.
 - Install tests use `PILOT_WORKERS_HOME` + `--target` pointing to `tmp_path`.
 - Covers: provider loading, policy matrices, runner adapter translation, render equivalence, dispatch verdict classification + per-mode result schemas, manifest v3 migration (v1/v2 purge ordering, `os.replace`), install/uninstall lifecycle, status command, CLI routing, credential handling, runtime isolation, per-run sandbox provisioning + lock staleness, fanout watchdog/signal/reason-precedence.

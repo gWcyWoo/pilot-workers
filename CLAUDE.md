@@ -69,7 +69,7 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/pytest
 ```
 
-Tests live in `tests/` (289 tests, all offline — no network, no real `~/.claude`/`~/.codex` access).
+Tests live in `tests/` (297 tests, all offline — no network, no real `~/.claude`/`~/.codex` access).
 
 ## Architecture
 
