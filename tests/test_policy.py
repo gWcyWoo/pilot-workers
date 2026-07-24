@@ -1,5 +1,7 @@
 """Offline unit tests for pilot_workers.policy."""
 
+from fnmatch import fnmatchcase
+
 import pytest
 
 from pilot_workers import policy
@@ -43,6 +45,104 @@ def test_readonly_shell_permissions():
     assert rules["rg *"] == "allow"
     assert rules["*>*"] == "deny"
     assert list(rules)[-1] == "*>*"
+
+
+def _resolve(rules, command):
+    """Mirror OpenCode's resolution: last-match-wins over insertion order."""
+    action = None
+    for pattern, value in rules.items():
+        if fnmatchcase(command, pattern):
+            action = value
+    return action
+
+
+def test_readonly_denies_awk_command_execution():
+    rules = readonly_shell_permissions()
+    assert _resolve(rules, "awk 'BEGIN{system(\"id\")}'") == "deny"
+    assert _resolve(rules, "awk '{print}' file.txt") == "deny"
+    assert _resolve(rules, "gawk 'BEGIN{\"id\" | getline}'") == "deny"
+
+
+def test_readonly_denies_sed_command_execution():
+    rules = readonly_shell_permissions()
+    assert _resolve(rules, "sed 's/a/b/e' file.txt") == "deny"
+    assert _resolve(rules, "sed -n '1,10p' file.txt") == "deny"
+    assert _resolve(rules, "sed -i 's/a/b/' file.txt") == "deny"
+
+
+def test_readonly_denies_find_exec_actions():
+    rules = readonly_shell_permissions()
+    assert _resolve(rules, "find . -name '*.py' -exec sh -c 'id' ;") == "deny"
+    assert _resolve(rules, "find . -execdir id ;") == "deny"
+    assert _resolve(rules, "find . -ok rm {} ;") == "deny"
+    assert _resolve(rules, "find . -name '*.pyc' -delete") == "deny"
+    assert _resolve(rules, "find . -fprintf /tmp/out '%p'") == "deny"
+    assert _resolve(rules, "find . -fls /tmp/out") == "deny"
+    assert _resolve(rules, "find . -name '*.py' -type f") == "allow"
+
+
+def test_readonly_denies_interpreters_and_forwarders():
+    rules = readonly_shell_permissions()
+    for command in (
+        "perl -e 'system(\"id\")'",
+        "python -c 'import os; os.system(\"id\")'",
+        "python3 evil.py",
+        "ruby -e 'system(\"id\")'",
+        "node -e 'require(\"child_process\").execSync(\"id\")'",
+        "xargs -I{} sh -c '{}'",
+        "sh -c id",
+        "bash -c id",
+        "zsh -c id",
+    ):
+        assert _resolve(rules, command) == "deny", command
+
+
+def test_readonly_npx_only_runs_tsc_itself():
+    rules = readonly_shell_permissions()
+    assert _resolve(rules, "npx tsc") == "allow"
+    assert _resolve(rules, "npx tsc --noEmit") == "allow"
+    assert _resolve(rules, "npx tscmalicious-package") == "deny"
+
+
+def test_readonly_denies_git_exec_and_write_flags():
+    rules = readonly_shell_permissions()
+    assert _resolve(rules, "git log --output=/tmp/exfil.txt") == "deny"
+    assert _resolve(rules, "git grep -Osh pattern") == "deny"
+    assert _resolve(rules, "git grep --open-files-in-pager=sh pattern") == "deny"
+    assert _resolve(rules, "git log --oneline -5") == "allow"
+    assert _resolve(rules, "git grep -n pattern") == "allow"
+
+
+def test_readonly_keeps_safe_read_commands_allowed():
+    rules = readonly_shell_permissions()
+    for command in (
+        "pwd",
+        "ls -la src",
+        "cat README.md",
+        "rg -n pattern src",
+        "grep -rn pattern src",
+        "head -20 file.txt",
+        "git diff --stat",
+        "git status",
+    ):
+        assert _resolve(rules, command) == "allow", command
+
+
+def test_test_mode_redirect_deny_stays_last():
+    rules = policy.test_shell_permissions()
+    assert list(rules)[-1] == "*>*"
+    assert _resolve(rules, "pytest > /tmp/out.txt") == "deny"
+    assert _resolve(rules, "npm test > /tmp/out.txt 2>&1") == "deny"
+
+
+def test_test_mode_inherits_exec_denies_but_allows_runners():
+    rules = policy.test_shell_permissions()
+    assert _resolve(rules, "awk 'BEGIN{system(\"id\")}'") == "deny"
+    assert _resolve(rules, "sed -i 's/a/b/' file.txt") == "deny"
+    assert _resolve(rules, "python evil.py") == "deny"
+    assert _resolve(rules, "pytest -x tests/") == "allow"
+    assert _resolve(rules, "python -m pytest tests/") == "allow"
+    assert _resolve(rules, "go test ./...") == "allow"
 
 
 def test_code_shell_permissions():

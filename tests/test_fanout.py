@@ -53,7 +53,7 @@ def _install_fake_popen(monkeypatch, behavior_for):
     """
     calls = []
 
-    def fake_popen(cmd, stdout=None, stderr=None, text=None, bufsize=None):
+    def fake_popen(cmd, **kwargs):
         calls.append(cmd)
         return _FakePopen(cmd, behavior_for(cmd))
 
@@ -317,6 +317,12 @@ def test_silent_child_gets_synthesized_verdict(
     assert results[1]["exit_code"] == 2
     assert len(results[1]["stderr_tail"]) <= 500
     assert "boom" in results[1]["stderr_tail"]
+    # v2 synthesized shape (D4)
+    assert results[1]["schema_version"] == 2
+    assert results[1]["reason"] == "crash"
+    assert results[1]["parse_state"] == "unavailable"
+    assert results[1]["result"] is None
+    assert results[1]["final_text_path"] is None
 
 
 @pytest.mark.parametrize("verdict,expected_rc", [
@@ -344,3 +350,100 @@ def test_exit_code_from_verdicts(
         "--workdir", workdir, "--job", f"glm:review:{task_file}",
     ])
     assert rc == expected_rc
+
+
+# ---------------------------------------------------------------------------
+# v2 synthesized verdicts (D4)
+# ---------------------------------------------------------------------------
+
+
+def _job(provider="glm", mode="review"):
+    return fanout_mod.Job(provider=provider, mode=mode, task_file="task.md")
+
+
+def test_synthesized_verdict_full_v2_shape():
+    verdict = fanout_mod._synthesized_verdict(_job(), 2, "tail text")
+    assert verdict == {
+        "job": "glm:review",
+        "type": "worker_runner.verdict",
+        "schema_version": 2,
+        "verdict": "error",
+        "synthesized": True,
+        "reason": "crash",
+        "exit_code": 2,
+        "stderr_tail": "tail text",
+        "parse_state": "unavailable",
+        "result": None,
+        "final_text_path": None,
+    }
+
+
+@pytest.mark.parametrize(
+    "reason", ["crash", "timeout", "idle_timeout", "interrupted"]
+)
+def test_synthesized_verdict_reason_enum(reason):
+    verdict = fanout_mod._synthesized_verdict(_job(), None, "", reason=reason)
+    assert verdict["reason"] == reason
+
+
+# ---------------------------------------------------------------------------
+# Watchdog deadline computation (D4)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_deadline_none_when_timeout_zero(monkeypatch):
+    monkeypatch.setattr(runtime, "TERMINATE_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(
+        fanout_mod, "HARVEST_ALLOWANCE_SECONDS", 0.3, raising=False
+    )
+    assert fanout_mod._compute_deadline(0) is None
+
+
+def test_compute_deadline_reads_constants_at_call_time(monkeypatch):
+    monkeypatch.setattr(runtime, "TERMINATE_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(
+        fanout_mod, "HARVEST_ALLOWANCE_SECONDS", 0.3, raising=False
+    )
+    assert fanout_mod._compute_deadline(10) == pytest.approx(10.5)
+    monkeypatch.setattr(
+        fanout_mod, "HARVEST_ALLOWANCE_SECONDS", 1.0, raising=False
+    )
+    assert fanout_mod._compute_deadline(10) == pytest.approx(11.2)
+
+
+# ---------------------------------------------------------------------------
+# CLI validation (D4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_max_parallel_below_one_is_argparse_error(value):
+    with pytest.raises(SystemExit) as excinfo:
+        fanout_mod.parse_args(["--workdir", "x", "--max-parallel", value])
+    assert excinfo.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# Spawn hardening (D4)
+# ---------------------------------------------------------------------------
+
+
+def test_popen_called_with_start_new_session(
+    monkeypatch, capsys, task_file, workdir
+):
+    _allow_credentials(monkeypatch)
+    recorded_kwargs = []
+
+    def fake_popen(cmd, **kwargs):
+        recorded_kwargs.append(kwargs)
+        return _FakePopen(cmd, _ok_behavior(cmd))
+
+    monkeypatch.setattr(fanout_mod.subprocess, "Popen", fake_popen)
+    rc = fanout_mod.main([
+        "--workdir", workdir, "--job", f"glm:review:{task_file}",
+    ])
+    assert rc == 0
+    assert recorded_kwargs
+    assert all(
+        kwargs.get("start_new_session") is True for kwargs in recorded_kwargs
+    )

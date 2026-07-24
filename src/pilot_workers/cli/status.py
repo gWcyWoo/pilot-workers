@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""Status reporting: provider credentials, host installs, runner presence.
+"""Status reporting: provider credentials, host-level installs, runner presence.
 
     pilot-workers status [--json]
-    pilot-workers status <provider> on <host> [--json]
+    pilot-workers status <host> [--json]
+
+v0.5.0 (design D2): installs are reported per HOST (the provider dimension is
+gone). The overview keeps per-provider credential status and adds a host-level
+installs section + runner presence. ``status <host>`` is the detail form; the
+old ``status <provider> on <host>`` pair form is a usage error (exit 2).
+``status --json`` keys installs by host only.
 """
 
 from __future__ import annotations
@@ -13,13 +19,27 @@ import sys
 
 from pilot_workers import providers, runtime
 from pilot_workers.cli import install as install_mod
-from pilot_workers.runners import RUNNERS, get_runner
+from pilot_workers.runners import RUNNERS, get_runner, opencode_runner
 from pilot_workers.runners.opencode_runner import PINNED_OPENCODE_VERSION
 
 STATUS_USAGE = (
     "usage: pilot-workers status [--json]\n"
-    "       pilot-workers status <provider> on <host> [--json]"
+    "       pilot-workers status <host> [--json]"
 )
+
+
+def _host_install_info(entry) -> dict:
+    """JSON/overview info for one host entry. A v3 flat entry has a top-level
+    ``files`` list; anything else (absent, or a legacy v1/v2 nesting) reads as
+    not-installed and should be (re)installed to migrate."""
+    if isinstance(entry, dict) and isinstance(entry.get("files"), list):
+        return {
+            "installed": True,
+            "installed_at": entry.get("installed_at"),
+            "package_version": entry.get("package_version"),
+            "files": entry.get("files", []),
+        }
+    return {"installed": False}
 
 
 def _collect() -> dict:
@@ -31,21 +51,14 @@ def _collect() -> dict:
         provider = providers.PROVIDERS[key]
         runner = get_runner(provider.runner)
         credential = runtime.credential_metadata(provider, runner)
-        host_state: dict = {}
-        for host in install_mod.HOSTS:
-            entries = installs.get(host, {})
-            if key in entries:
-                host_state[host] = "installed"
-            elif "__all__" in entries:
-                host_state[host] = "installed (legacy)"
-            else:
-                host_state[host] = "-"
         providers_info[key] = {
             "credential": {
                 "configured": credential["configured"],
                 "path": credential["path"],
             },
-            "hosts": host_state,
+            "strengths": provider.strengths,
+            "suitable_modes": provider.suitable_modes,
+            "notes": provider.notes,
         }
 
     runners_info: dict = {}
@@ -56,11 +69,15 @@ def _collect() -> dict:
         present = bool(binary and binary.is_file())
         version: str | None = None
         if present:
-            proc = subprocess.run(
-                [str(binary), "--version"],
-                text=True, capture_output=True, check=False,
-            )
-            version = (proc.stdout or proc.stderr).strip() or None
+            if name == "opencode":
+                # D6: share the cached --version seam with resolve_binary.
+                version = opencode_runner.probe_version(binary)
+            else:
+                proc = subprocess.run(
+                    [str(binary), "--version"],
+                    text=True, capture_output=True, check=False,
+                )
+                version = (proc.stdout or proc.stderr).strip() or None
         runners_info[name] = {
             "present": present,
             "version": version,
@@ -68,7 +85,15 @@ def _collect() -> dict:
             "binary": str(binary) if binary else None,
         }
 
-    return {"providers": providers_info, "runners": runners_info}
+    installs_info: dict = {}
+    for host in install_mod.HOSTS:
+        installs_info[host] = _host_install_info(installs.get(host))
+
+    return {
+        "providers": providers_info,
+        "runners": runners_info,
+        "installs": installs_info,
+    }
 
 
 def _render_table(headers: list[str], rows: list[list[str]]) -> list[str]:
@@ -92,12 +117,23 @@ def _render_human(data: dict) -> str:
         [
             key,
             "ok" if info["credential"]["configured"] else "missing",
-            info["hosts"]["claude"],
-            info["hosts"]["codex"],
         ]
         for key, info in data["providers"].items()
     ]
-    lines += _render_table(["PROVIDER", "CREDENTIAL", "CLAUDE", "CODEX"], rows)
+    lines += _render_table(["PROVIDER", "CREDENTIAL"], rows)
+    for key, info in data["providers"].items():
+        strengths = info.get("strengths", "")
+        suitable_modes = info.get("suitable_modes", "")
+        note = info.get("notes", "")
+        if strengths or suitable_modes or note:
+            parts = []
+            if strengths:
+                parts.append(strengths)
+            if suitable_modes:
+                parts.append(f"modes: {suitable_modes}")
+            if note:
+                parts.append(note)
+            lines.append(f"  {key}: {' — '.join(parts)}")
     lines.append("")
     lines.append("Runners")
     rows = []
@@ -111,40 +147,36 @@ def _render_human(data: dict) -> str:
             )
         rows.append([name, "yes" if info["present"] else "no", version])
     lines += _render_table(["RUNNER", "PRESENT", "VERSION"], rows)
+    lines.append("")
+    lines.append("Installs")
+    rows = []
+    for host, info in data["installs"].items():
+        if info.get("installed"):
+            rows.append([host, "yes", str(len(info.get("files", [])))])
+        else:
+            rows.append([host, "no", "0"])
+    lines += _render_table(["HOST", "INSTALLED", "FILES"], rows)
     return "\n".join(lines)
 
 
-def _pair_status(provider_key: str, host: str, json_mode: bool) -> int:
-    if provider_key not in providers.PROVIDERS:
-        print(f"error: unknown provider: {provider_key}", file=sys.stderr)
-        return 2
-    if host not in install_mod.HOSTS:
-        print(f"error: unknown host: {host}", file=sys.stderr)
-        return 2
+def _host_detail(host: str, json_mode: bool) -> int:
     manifest = install_mod._load_manifest(install_mod._manifest_path())
-    entries = manifest.get("installs", {}).get(host, {})
-    entry = entries.get(provider_key)
-    legacy = False
-    if entry is None and "__all__" in entries:
-        entry = entries["__all__"]
-        legacy = True
+    entry = manifest.get("installs", {}).get(host)
+    info = _host_install_info(entry)
     if json_mode:
         print(json.dumps({
-            "provider": provider_key,
             "host": host,
-            "installed": entry is not None,
-            "legacy": legacy,
-            "entry": entry,
+            "installed": info["installed"],
+            "entry": entry if info["installed"] else None,
         }, indent=2))
         return 0
-    if entry is None:
-        print(f"{provider_key} on {host}: not installed")
+    if not info["installed"]:
+        print(f"{host}: not installed")
         return 0
-    state = "installed (legacy)" if legacy else "installed"
-    print(f"{provider_key} on {host}: {state}")
+    print(f"{host}: installed")
     print(f"  installed_at: {entry.get('installed_at', '-')}")
     print(f"  package_version: {entry.get('package_version', '-')}")
-    print("  files:")
+    print(f"  files ({len(entry.get('files', []))}):")
     for name in entry.get("files", []):
         print(f"    {name}")
     return 0
@@ -164,8 +196,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(_render_human(data))
             return 0
 
-        if len(args) == 3 and args[1] == "on":
-            return _pair_status(args[0], args[2], json_mode)
+        if len(args) == 1 and args[0] in install_mod.HOSTS:
+            return _host_detail(args[0], json_mode)
     except (OSError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

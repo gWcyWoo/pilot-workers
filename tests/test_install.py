@@ -1,7 +1,18 @@
-"""Offline tests for pilot_workers.cli.install (v0.3.0 grammar).
+"""Offline tests for pilot_workers.cli.install (v0.5.0 host-level grammar).
 
 All tests isolate the pilot home via PILOT_WORKERS_HOME and pass --target
 pointing at tmp_path, so real ~/.claude and ~/.codex are never touched.
+
+v3 contract (design-v0.5.0 D2):
+- Grammar: install|uninstall <host|all>, install|uninstall runner <name>.
+  The provider dimension and the `on` keyword are gone; removed forms yield
+  usage errors (exit 2, message contains "usage:").
+- Assets: INTEGRATIONS_DIR/<host>-host/skills/pilot-workers/ is installed
+  host-level by install_host(host, target) -> {"files", "created_dirs"}.
+- Manifest v3: {"schema_version": 3, "installs": {"<host>": {...}}} with no
+  provider nesting; installing over a v1/v2 manifest purges every legacy
+  entry for that host (one printed "removed" line per removed file) and the
+  on-disk file is rewritten as v3.
 """
 
 from __future__ import annotations
@@ -24,7 +35,7 @@ def isolated(tmp_path, monkeypatch):
     return {"home": home, "target": target}
 
 
-def _manifest_path() -> object:
+def _manifest_path() -> Path:
     return providers.pilot_home() / "install-manifest.json"
 
 
@@ -41,143 +52,99 @@ def _write_v1_manifest(home_entries: dict) -> None:
     }), encoding="utf-8")
 
 
-def test_install_provider_on_claude_writes_manifest(isolated):
-    rc = install_mod.main(["glm", "on", "claude", "--target", str(isolated["target"])])
-    assert rc == 0
-
-    manifest_path = _manifest_path()
-    assert manifest_path.is_file()
-    manifest = _read_manifest()
-    assert manifest["schema_version"] == 2
-    entry = manifest["installs"]["claude"]["glm"]
-    # glm: 4 agents + 4 commands.
-    assert len(entry["files"]) == 8
-    # Every recorded file path must exist on disk under the target.
-    for name in entry["files"]:
-        assert Path(name).is_file()
-        assert Path(name).is_relative_to(isolated["target"].resolve())
-    assert entry["created_dirs"]
-    assert entry["installed_at"]
-    assert entry["package_version"]
+def _write_v2_manifest(installs: dict) -> None:
+    path = _manifest_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "schema_version": 2,
+        "installs": installs,
+    }), encoding="utf-8")
 
 
-def test_install_single_provider_only_copies_that_providers_files(isolated):
-    target = isolated["target"]
-    assert install_mod.main(["glm", "on", "claude", "--target", str(target)]) == 0
-
-    installed = [p for p in target.rglob("*") if p.is_file()]
-    assert installed
-    for path in installed:
-        assert "ds" not in path.name
-        assert "kimi" not in str(path)
-    assert len([p for p in target.rglob("*.md")]) == 8
+def _make_legacy_files(base: Path, rel_names: list[str]) -> list[Path]:
+    paths = []
+    for rel in rel_names:
+        p = base / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("legacy", encoding="utf-8")
+        paths.append(p)
+    return paths
 
 
-def test_install_provider_without_commands_dir_installs_agents_only(isolated):
-    # ds has no claude-host/commands/ds directory.
-    target = isolated["target"]
-    assert install_mod.main(["ds", "on", "claude", "--target", str(target)]) == 0
-
-    entry = _read_manifest()["installs"]["claude"]["ds"]
-    assert len(entry["files"]) == 4
-    assert all(Path(name).parent.name == "agents" for name in entry["files"])
-
-
-def test_install_kimi_uses_asset_prefix(isolated):
-    target = isolated["target"]
-    assert install_mod.main(["kimi-k3", "on", "claude", "--target", str(target)]) == 0
-
-    entry = _read_manifest()["installs"]["claude"]["kimi-k3"]
-    # asset_prefix 'kimi': 4 agents + 4 commands.
-    assert len(entry["files"]) == 8
-    assert any("kimi-coder.md" in name for name in entry["files"])
+def _legacy_entry(files: list[Path], version: str = "0.4.0") -> dict:
+    return {
+        "installed_at": "2025-01-01T00:00:00+00:00",
+        "package_version": version,
+        "files": [str(p) for p in files],
+        "created_dirs": [],
+    }
 
 
-def test_reinstall_purges_stale_files(isolated, capsys):
-    target = str(isolated["target"])
-    assert install_mod.main(["glm", "on", "claude", "--target", target]) == 0
-    first_files = list(_read_manifest()["installs"]["claude"]["glm"]["files"])
-
-    assert install_mod.main(["glm", "on", "claude", "--target", target]) == 0
-    out = capsys.readouterr().out
-    assert "stale file" in out
-
-    manifest = _read_manifest()
-    second_files = manifest["installs"]["claude"]["glm"]["files"]
-    assert len(second_files) == 8
-    assert sorted(second_files) == sorted(first_files)
-
-    # No duplicated files on disk.
-    installed = [p for p in Path(target).rglob("*.md") if p.is_file()]
-    assert len(installed) == 8
+# ----------------------------------------------------------------------
+# grammar: accepted forms
+# ----------------------------------------------------------------------
 
 
-def test_install_provider_on_codex_records_skills(isolated):
-    rc = install_mod.main(["glm", "on", "codex", "--target", str(isolated["target"])])
-    assert rc == 0
-
-    entry = _read_manifest()["installs"]["codex"]["glm"]
-    files = [Path(name) for name in entry["files"]]
-    assert any(f.name == "SKILL.md" and "glm" in f.parts for f in files)
-
-    created_dirs = [Path(name) for name in entry["created_dirs"]]
-    assert any(d.name == "glm" for d in created_dirs)
+def test_parse_install_claude_accepted(capsys):
+    spec = install_mod._parse_grammar(["claude"], "install", install_mod.INSTALL_USAGE)
+    assert spec["host"] == "claude"
+    # The provider dimension is gone from the grammar.
+    assert "provider" not in spec
+    # 'install claude' is the canonical form: no deprecation note.
+    assert "deprecated" not in capsys.readouterr().err
 
 
-def test_install_all_on_all_full_matrix(isolated):
-    rc = install_mod.main(["all", "on", "all", "--target", str(isolated["target"])])
-    assert rc == 0
-
-    installs = _read_manifest()["installs"]
-    assert set(installs) == {"claude", "codex"}
-    for host in ("claude", "codex"):
-        assert set(installs[host]) == {"ds", "glm", "kimi-k3"}
-    assert len(installs["claude"]["ds"]["files"]) == 4
-    assert len(installs["claude"]["glm"]["files"]) == 8
-    assert len(installs["claude"]["kimi-k3"]["files"]) == 8
-    for key in ("ds", "glm", "kimi-k3"):
-        assert len(installs["codex"][key]["files"]) == 2
+def test_parse_uninstall_codex_accepted(capsys):
+    spec = install_mod._parse_grammar(
+        ["codex"], "uninstall", install_mod.UNINSTALL_USAGE)
+    assert spec["host"] == "codex"
+    assert "provider" not in spec
+    assert "deprecated" not in capsys.readouterr().err
 
 
-def test_install_provider_on_all_hosts(isolated):
-    rc = install_mod.main(["glm", "on", "all", "--target", str(isolated["target"])])
-    assert rc == 0
-    installs = _read_manifest()["installs"]
-    assert set(installs) == {"claude", "codex"}
-    assert set(installs["claude"]) == {"glm"}
-    assert set(installs["codex"]) == {"glm"}
+def test_parse_install_all_accepted(capsys):
+    spec = install_mod._parse_grammar(["all"], "install", install_mod.INSTALL_USAGE)
+    assert spec["host"] == "all"
+    assert "provider" not in spec
+    assert "deprecated" not in capsys.readouterr().err
 
 
-def test_deprecated_host_alias_maps_to_all_on_host(isolated, capsys):
-    rc = install_mod.main(["claude", "--target", str(isolated["target"])])
-    assert rc == 0
-    err = capsys.readouterr().err
-    assert "is deprecated" in err
-    assert "install all on claude" in err
-
-    installs = _read_manifest()["installs"]
-    assert set(installs) == {"claude"}
-    assert set(installs["claude"]) == {"ds", "glm", "kimi-k3"}
+def test_runner_grammar_unchanged_parse_only():
+    spec = install_mod._parse_grammar(
+        ["runner", "opencode"], "install", install_mod.INSTALL_USAGE)
+    assert spec["kind"] == "runner"
+    assert spec["name"] == "opencode"
 
 
-def test_deprecated_bare_all_alias_maps_to_all_on_all(isolated, capsys):
-    rc = install_mod.main(["all", "--target", str(isolated["target"])])
-    assert rc == 0
-    assert "is deprecated" in capsys.readouterr().err
-    assert set(_read_manifest()["installs"]) == {"claude", "codex"}
+# ----------------------------------------------------------------------
+# grammar: removed forms are usage errors
+# ----------------------------------------------------------------------
 
 
-def test_grammar_error_missing_on_suggests_fix(isolated, capsys):
-    rc = install_mod.main(["glm", "claude"])
+def test_install_provider_on_host_is_usage_error(isolated, capsys):
+    rc = install_mod.main(
+        ["glm", "on", "claude", "--target", str(isolated["target"])])
     assert rc == 2
-    err = capsys.readouterr().err
-    assert "did you mean 'install glm on claude'?" in err
+    assert "usage:" in capsys.readouterr().err
 
 
-def test_grammar_error_unknown_provider(isolated, capsys):
-    rc = install_mod.main(["bogus", "on", "claude"])
+def test_uninstall_provider_on_host_is_usage_error(isolated, capsys):
+    rc = install_mod.uninstall_main(["glm", "on", "claude"])
     assert rc == 2
-    assert "unknown provider" in capsys.readouterr().err
+    assert "usage:" in capsys.readouterr().err
+
+
+def test_install_skill_on_host_is_usage_error(isolated, capsys):
+    rc = install_mod.main(
+        ["skill", "on", "claude", "--target", str(isolated["target"])])
+    assert rc == 2
+    assert "usage:" in capsys.readouterr().err
+
+
+def test_install_unknown_host_is_usage_error(isolated, capsys):
+    rc = install_mod.main(["bogus", "--target", str(isolated["target"])])
+    assert rc == 2
+    assert "usage:" in capsys.readouterr().err
 
 
 def test_grammar_error_empty_argv(isolated, capsys):
@@ -192,113 +159,218 @@ def test_grammar_error_unknown_runner(isolated, capsys):
     assert "unknown runner" in capsys.readouterr().err
 
 
-def test_v1_manifest_legacy_entry_purged_on_install(isolated, capsys):
-    target = isolated["target"]
-    stale = target / "agents" / "old-agent.md"
-    stale.parent.mkdir(parents=True)
-    stale.write_text("stale", encoding="utf-8")
-    _write_v1_manifest({"claude": {
-        "installed_at": "2025-01-01T00:00:00+00:00",
-        "package_version": "0.2.0",
-        "files": [str(stale)],
-        "created_dirs": [str(stale.parent)],
-    }})
+# ----------------------------------------------------------------------
+# install_host asset installer
+# ----------------------------------------------------------------------
 
-    rc = install_mod.main(["glm", "on", "claude", "--target", str(target)])
+
+def test_install_host_claude_copies_skill_tree(isolated):
+    target = isolated["target"]
+    result = install_mod.install_host("claude", target)
+
+    assert set(result) >= {"files", "created_dirs"}
+    assert result["files"]
+    skill_root = (target / "skills" / "pilot-workers").resolve()
+    for name in result["files"]:
+        path = Path(name)
+        assert path.is_file()
+        assert path.is_relative_to(skill_root)
+
+
+def test_install_host_codex_copies_skill_tree(isolated, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(isolated["home"] / "codex-home"))
+    target = isolated["target"]
+    result = install_mod.install_host("codex", target)
+
+    assert result["files"]
+    skill_root = (target / "pilot-workers").resolve()
+    for name in result["files"]:
+        path = Path(name)
+        assert path.is_file()
+        assert path.is_relative_to(skill_root)
+
+
+# ----------------------------------------------------------------------
+# manifest v3
+# ----------------------------------------------------------------------
+
+
+def test_install_claude_writes_v3_manifest(isolated):
+    rc = install_mod.main(["claude", "--target", str(isolated["target"])])
     assert rc == 0
-    out = capsys.readouterr().out
-    assert "note: replacing legacy v0.2.0 install on claude" in out
-    assert not stale.exists()
 
     manifest = _read_manifest()
-    assert manifest["schema_version"] == 2
-    assert "glm" in manifest["installs"]["claude"]
-    assert "__all__" not in manifest["installs"]["claude"]
+    assert manifest["schema_version"] == 3
+    assert "hosts" not in manifest
+    entry = manifest["installs"]["claude"]
+    # Host-level entry: flat shape, no provider nesting.
+    assert entry["installed_at"]
+    assert entry["package_version"]
+    assert entry["files"]
+    for key in ("glm", "kimi-k3", "ds", "__all__"):
+        assert key not in entry
+    for name in entry["files"]:
+        assert Path(name).is_file()
 
 
-def test_uninstall_all_on_host_clears_legacy_entry(isolated):
+def test_install_all_installs_both_hosts_v3(isolated):
+    rc = install_mod.main(["all", "--target", str(isolated["target"])])
+    assert rc == 0
+
+    manifest = _read_manifest()
+    assert manifest["schema_version"] == 3
+    installs = manifest["installs"]
+    assert set(installs) == {"claude", "codex"}
+    for host in ("claude", "codex"):
+        entry = installs[host]
+        assert entry["files"]
+        for key in ("glm", "kimi-k3", "ds", "__all__"):
+            assert key not in entry
+
+
+def test_reinstall_purges_previous_host_install(isolated, capsys):
+    target = str(isolated["target"])
+    assert install_mod.main(["claude", "--target", target]) == 0
+    first_files = list(_read_manifest()["installs"]["claude"]["files"])
+    assert first_files
+
+    assert install_mod.main(["claude", "--target", target]) == 0
+    out = capsys.readouterr().out
+    # One printed line per removed file.
+    removed_lines = [line for line in out.splitlines() if "removed" in line]
+    assert len(removed_lines) >= len(first_files)
+
+    second_files = _read_manifest()["installs"]["claude"]["files"]
+    assert sorted(second_files) == sorted(first_files)
+    # No duplicated files on disk.
+    on_disk = [p for p in isolated["target"].rglob("*") if p.is_file()]
+    assert len(on_disk) == len(first_files)
+
+
+# ----------------------------------------------------------------------
+# legacy manifest migration on install
+# ----------------------------------------------------------------------
+
+
+def test_v2_manifest_migrated_to_v3_on_install(isolated, capsys):
     target = isolated["target"]
-    stale = target / "agents" / "old-agent.md"
-    stale.parent.mkdir(parents=True)
-    stale.write_text("stale", encoding="utf-8")
-    _write_v1_manifest({"claude": {
-        "installed_at": "2025-01-01T00:00:00+00:00",
-        "package_version": "0.2.0",
-        "files": [str(stale)],
-        "created_dirs": [str(stale.parent)],
+    glm_files = _make_legacy_files(
+        target, ["agents/glm-coder.md", "commands/glm/review.md"])
+    all_files = _make_legacy_files(target, ["agents/old-bundle.md"])
+    legacy = glm_files + all_files
+    _write_v2_manifest({"claude": {
+        "glm": _legacy_entry(glm_files),
+        "__all__": _legacy_entry(all_files, version="0.2.0"),
     }})
 
-    rc = install_mod.uninstall_main(["all", "on", "claude"])
+    rc = install_mod.main(["claude", "--target", str(target)])
     assert rc == 0
-    assert not stale.exists()
-    # claude held only the legacy entry → manifest file is gone.
-    assert not _manifest_path().exists()
+    out = capsys.readouterr().out
+
+    # Every legacy file for the host is purged, one printed line each.
+    for p in legacy:
+        assert not p.exists()
+    removed_lines = [line for line in out.splitlines() if "removed" in line]
+    assert len(removed_lines) >= len(legacy)
+
+    # The on-disk manifest is v3: no "hosts" key, no provider nesting.
+    manifest = _read_manifest()
+    assert manifest["schema_version"] == 3
+    assert "hosts" not in manifest
+    entry = manifest["installs"]["claude"]
+    assert "glm" not in entry
+    assert "__all__" not in entry
+    assert entry["files"]
 
 
-def test_uninstall_pair_removes_files_and_manifest_entry(isolated):
-    target = str(isolated["target"])
-    assert install_mod.main(["all", "on", "all", "--target", target]) == 0
-    glm_files = list(_read_manifest()["installs"]["claude"]["glm"]["files"])
+def test_v1_manifest_migrated_to_v3_on_install(isolated, capsys):
+    target = isolated["target"]
+    legacy = _make_legacy_files(target, ["agents/old-agent.md"])
+    _write_v1_manifest({"claude": _legacy_entry(legacy, version="0.2.0")})
 
-    rc = install_mod.uninstall_main(["glm", "on", "claude"])
+    rc = install_mod.main(["claude", "--target", str(target)])
     assert rc == 0
+    out = capsys.readouterr().out
 
-    # Every file recorded for glm on claude is gone from disk.
-    for name in glm_files:
-        assert not Path(name).exists()
+    for p in legacy:
+        assert not p.exists()
+    removed_lines = [line for line in out.splitlines() if "removed" in line]
+    assert len(removed_lines) >= len(legacy)
 
-    installs = _read_manifest()["installs"]
-    assert "glm" not in installs["claude"]
-    # Other providers and hosts are untouched.
-    assert "ds" in installs["claude"]
-    assert "glm" in installs["codex"]
+    manifest = _read_manifest()
+    assert manifest["schema_version"] == 3
+    assert "hosts" not in manifest
+    entry = manifest["installs"]["claude"]
+    assert "__all__" not in entry
+    assert entry["files"]
 
 
-def test_uninstall_all_on_all_deletes_manifest_file(isolated):
+# ----------------------------------------------------------------------
+# uninstall
+# ----------------------------------------------------------------------
+
+
+def test_uninstall_claude_v3_removes_files_and_deletes_manifest(isolated):
     target = str(isolated["target"])
-    assert install_mod.main(["all", "on", "all", "--target", target]) == 0
-    assert _manifest_path().is_file()
-
-    assert install_mod.uninstall_main(["all", "on", "all"]) == 0
-    assert not _manifest_path().exists()
-
-
-def test_uninstall_deprecated_alias(isolated, capsys):
-    target = str(isolated["target"])
-    assert install_mod.main(["glm", "on", "claude", "--target", target]) == 0
+    assert install_mod.main(["claude", "--target", target]) == 0
+    files = [Path(n) for n in _read_manifest()["installs"]["claude"]["files"]]
+    assert files
 
     rc = install_mod.uninstall_main(["claude"])
     assert rc == 0
-    assert "is deprecated" in capsys.readouterr().err
+
+    for p in files:
+        assert not p.exists()
+    # Empty manifest → file deleted.
+    assert not _manifest_path().exists()
+
+
+def test_uninstall_claude_purges_legacy_v2_entries(isolated, capsys):
+    target = isolated["target"]
+    glm_files = _make_legacy_files(target, ["agents/glm-coder.md"])
+    all_files = _make_legacy_files(target, ["agents/old-bundle.md"])
+    _write_v2_manifest({"claude": {
+        "glm": _legacy_entry(glm_files),
+        "__all__": _legacy_entry(all_files, version="0.2.0"),
+    }})
+
+    rc = install_mod.uninstall_main(["claude"])
+    assert rc == 0
+    # No deprecation note on the canonical host form.
+    assert "deprecated" not in capsys.readouterr().err
+
+    for p in glm_files + all_files:
+        assert not p.exists()
+    assert not _manifest_path().exists()
+
+
+def test_uninstall_claude_purges_legacy_v1_entry(isolated):
+    target = isolated["target"]
+    legacy = _make_legacy_files(target, ["agents/old-agent.md"])
+    _write_v1_manifest({"claude": _legacy_entry(legacy, version="0.2.0")})
+
+    rc = install_mod.uninstall_main(["claude"])
+    assert rc == 0
+    for p in legacy:
+        assert not p.exists()
     assert not _manifest_path().exists()
 
 
 def test_uninstall_without_manifest_returns_1(isolated, capsys):
-    rc = install_mod.uninstall_main(["glm", "on", "claude"])
+    rc = install_mod.uninstall_main(["claude"])
     assert rc == 1
     assert "no install manifest" in capsys.readouterr().err
 
 
-def test_uninstall_pair_missing_from_manifest_returns_1(isolated, capsys):
-    target = str(isolated["target"])
-    assert install_mod.main(["glm", "on", "claude", "--target", target]) == 0
-
-    rc = install_mod.uninstall_main(["ds", "on", "claude"])
-    assert rc == 1
-    assert "no manifest entry" in capsys.readouterr().err
-    # glm entry is untouched.
-    assert "glm" in _read_manifest()["installs"]["claude"]
+def test_uninstall_with_target_returns_2(capsys):
+    rc = install_mod.uninstall_main(["claude", "--target", "/tmp/x"])
+    assert rc == 2
+    assert "--target" in capsys.readouterr().err
 
 
-def test_uninstall_partial_missing_warns_and_continues(isolated, capsys):
-    target = str(isolated["target"])
-    assert install_mod.main(["glm", "on", "claude", "--target", target]) == 0
-
-    rc = install_mod.uninstall_main(["glm", "on", "all"])
-    assert rc == 0
-    err = capsys.readouterr().err
-    assert "no manifest entry for glm on codex" in err
-    assert not _manifest_path().exists()
+# ----------------------------------------------------------------------
+# runner branch (unchanged)
+# ----------------------------------------------------------------------
 
 
 def test_uninstall_runner_missing_is_note_exit_0(isolated, capsys):
@@ -321,20 +393,6 @@ def test_uninstall_runner_removes_tree(isolated, capsys):
     assert not runtime_root.exists()
 
 
-def test_install_invalid_host_returns_2(capsys):
-    rc = install_mod.main(["glm", "on", "bogus"])
-    assert rc == 2
-    assert "unknown host" in capsys.readouterr().err.lower() or "usage" in capsys.readouterr().err.lower()
-
-
-def test_install_target_equals_syntax(isolated):
-    target = str(isolated["target"])
-    rc = install_mod.main(["glm", "on", "claude", f"--target={target}"])
-    assert rc == 0
-    manifest = _read_manifest()
-    assert "glm" in manifest["installs"]["claude"]
-
-
 def test_install_runner_unknown_returns_2(capsys):
     rc = install_mod.main(["runner", "nonexistent"])
     assert rc == 2
@@ -347,19 +405,15 @@ def test_install_runner_with_target_returns_2(capsys):
     assert "--target" in capsys.readouterr().err
 
 
-def test_uninstall_with_target_returns_2(capsys):
-    rc = install_mod.uninstall_main(["glm", "on", "claude", "--target", "/tmp/x"])
-    assert rc == 2
-    assert "--target" in capsys.readouterr().err
-
-
 def test_install_runner_opencode_happy_path(monkeypatch, tmp_path):
     import subprocess
     monkeypatch.setenv("PILOT_WORKERS_HOME", str(tmp_path))
     calls = []
+
     def mock_run(cmd, **kwargs):
         calls.append(cmd)
         return subprocess.CompletedProcess(cmd, 0)
+
     monkeypatch.setattr("subprocess.run", mock_run)
     rc = install_mod.main(["runner", "opencode"])
     assert rc == 0

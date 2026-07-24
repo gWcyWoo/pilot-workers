@@ -15,7 +15,7 @@ import threading
 import time
 from typing import Any, TextIO
 
-from pilot_workers.providers import Provider, profile_paths
+from pilot_workers.providers import Provider, profile_paths, run_paths
 from pilot_workers.runners.base import Runner, UnifiedEvent
 
 SAFE_ENV_KEYS = (
@@ -46,16 +46,25 @@ def ensure_private_directory(path: Path) -> None:
     path.chmod(0o700)
 
 
-def build_environment(provider: Provider, runner_env: dict[str, str]) -> dict[str, str]:
+def build_environment(
+    provider: Provider,
+    runner_env: dict[str, str],
+    paths: dict[str, Path] | None = None,
+) -> dict[str, str]:
     """Compose the child process environment.
 
     Neutral concerns (SAFE_ENV_KEYS whitelist + XDG dirs) are owned here; the
     runner-specific variables come from ``runner.runner_environment`` via the
     ``runner_env`` argument and are merged unchanged.
+
+    ``paths`` overrides the XDG targets: given a per-run sandbox mapping
+    (``providers.run_paths``), the XDG dirs point at the sandbox; omitted,
+    the shared provider profile is used (and created) as before.
     """
-    paths = profile_paths(provider)
-    for name in ("root", "config", "data", "state", "cache"):
-        ensure_private_directory(paths[name])
+    if paths is None:
+        paths = profile_paths(provider)
+        for name in ("root", "config", "data", "state", "cache"):
+            ensure_private_directory(paths[name])
     env = {key: os.environ[key] for key in SAFE_ENV_KEYS if os.environ.get(key)}
     env.update({
         "XDG_CONFIG_HOME": str(paths["config"]),
@@ -70,6 +79,136 @@ def build_environment(provider: Provider, runner_env: dict[str, str]) -> dict[st
     filtered = {k: v for k, v in runner_env.items() if k not in _PROTECTED_KEYS}
     env.update(filtered)
     return env
+
+
+# ---------------------------------------------------------------------------
+# Per-run sandbox (D5): process start times, run locks, provisioning
+# ---------------------------------------------------------------------------
+
+
+def process_start_time(pid: int) -> str | None:
+    """Opaque token identifying the process incarnation at ``pid``.
+
+    Linux: /proc/<pid>/stat field 22 (parsed after the LAST ')' because the
+    comm field may contain spaces/parens). macOS: locale-pinned
+    ``LC_TIME=C ps -o lstart= -p <pid>``. Returns None on any failure.
+    """
+    try:
+        if sys.platform == "darwin":
+            env = dict(os.environ)
+            env["LC_TIME"] = "C"
+            result = subprocess.run(
+                ["ps", "-o", "lstart=", "-p", str(pid)],
+                text=True, capture_output=True, check=False, env=env,
+            )
+            if result.returncode != 0:
+                return None
+            token = result.stdout.strip()
+            return token or None
+        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        fields = text[text.rindex(")") + 1:].split()
+        # fields[0] is field 3 (state); starttime is field 22 → index 19.
+        return fields[19]
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def read_run_lock(root: Path) -> dict[str, Any] | None:
+    """Read the sandbox lockfile; None when absent or unreadable."""
+    try:
+        payload = json.loads((root / ".lock").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def lock_is_stale(lock: dict[str, Any]) -> bool:
+    """A lock is stale when the pid is dead or was recycled since locking.
+
+    When the platform start-time source is unavailable, fall back to
+    pid-dead-only.
+    """
+    pid = lock.get("pid")
+    if not isinstance(pid, int):
+        return True
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return True
+    started_at = process_start_time(pid)
+    if started_at is None:
+        return False
+    return started_at != lock.get("started_at")
+
+
+def acquire_run_lock(root: Path) -> None:
+    """Create ``root/.lock`` (O_CREAT|O_EXCL) with {pid, started_at}.
+
+    A live lock raises RuntimeError ("run is still active"); a stale lock is
+    unlinked and acquisition retried once.
+    """
+    lock_path = root / ".lock"
+    payload = json.dumps({
+        "pid": os.getpid(),
+        "started_at": process_start_time(os.getpid()),
+    })
+    for attempt in range(2):
+        try:
+            descriptor = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            existing = read_run_lock(root)
+            if existing is not None and not lock_is_stale(existing):
+                raise RuntimeError(
+                    f"run is still active (pid {existing.get('pid')}): {root}"
+                )
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+            continue
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        return
+    raise RuntimeError(f"cannot acquire run lock: {lock_path}")
+
+
+def release_run_lock(root: Path) -> None:
+    """Remove the sandbox lockfile; a missing lockfile is not an error."""
+    try:
+        (root / ".lock").unlink()
+    except OSError:
+        pass
+
+
+def provision_run_sandbox(provider: Provider, run_id: str, runner: Runner) -> dict[str, Path]:
+    """Provision a per-run sandbox and hold its lock.
+
+    Creates the private 0700 root/config/data/state dirs, links ``cache`` to
+    the shared per-provider cache, links ``data/opencode/auth.json`` to the
+    canonical credential (zero-copy; the reaper unlinks, never follows), and
+    acquires the run lock. Returns ``providers.run_paths(provider, run_id)``.
+    """
+    from pilot_workers.providers import runs_root as _runs_root
+    paths = run_paths(provider, run_id)
+    ensure_private_directory(_runs_root(provider))
+    ensure_private_directory(paths["root"])
+    acquire_run_lock(paths["root"])
+    try:
+        for name in ("config", "data", "state"):
+            ensure_private_directory(paths[name])
+        shared_cache = profile_paths(provider)["cache"]
+        ensure_private_directory(shared_cache)
+        if not paths["cache"].exists():
+            os.symlink(str(shared_cache), str(paths["cache"]))
+        opencode_data = paths["data"] / "opencode"
+        opencode_data.mkdir(parents=True, exist_ok=True)
+        auth_link = opencode_data / "auth.json"
+        if not auth_link.exists() and not auth_link.is_symlink():
+            os.symlink(str(runner.credential_path(provider)), str(auth_link))
+    except Exception:
+        release_run_lock(paths["root"])
+        raise
+    return paths
 
 
 def credential_key(provider: Provider, runner: Runner) -> str:

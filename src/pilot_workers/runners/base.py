@@ -85,7 +85,8 @@ class Runner(ABC):
                       workdir: Path, run_id: str, session: str | None) -> list[str]: ...
 
     @abstractmethod
-    def runner_environment(self, provider: Any, config: dict) -> dict[str, str]:
+    def runner_environment(self, provider: Any, config: dict,
+                           paths: dict | None = None) -> dict[str, str]:
         """Only the env vars specific to this runner; neutral parts
         (SAFE_ENV_KEYS / XDG) are owned by the runtime layer."""
 

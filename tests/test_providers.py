@@ -1,5 +1,6 @@
 """Offline unit tests for pilot_workers.providers."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -134,3 +135,91 @@ def test_pilot_home_respects_env_var(monkeypatch, tmp_path):
     monkeypatch.setenv("PILOT_WORKERS_HOME", str(tmp_path))
     monkeypatch.delenv("CODEX_HOME", raising=False)
     assert pilot_home() == tmp_path.resolve()
+
+
+# ----------------------------------------------------------------------
+# v0.5.0 (design D1): optional flat metadata fields strengths /
+# suitable_modes / notes, surfaced by `pilot-workers status`.
+# ----------------------------------------------------------------------
+
+
+def test_provider_metadata_fields_default_to_empty():
+    p = Provider(
+        key="x",
+        provider_id="acme",
+        model_id="m1",
+        base_url="https://example.invalid",
+        display_name="X",
+        context_tokens=1,
+        output_tokens=1,
+    )
+    assert p.strengths == ""
+    assert p.suitable_modes == ""
+    assert p.notes == ""
+
+
+METADATA_YAML = (
+    "strengths: long context, strong rewrite-scale diffs\n"
+    "suitable_modes: code, review\n"
+    "notes: subscription tier required\n"
+)
+
+
+def test_load_providers_metadata_fields(tmp_path):
+    text = VALID_PROVIDER_YAML + METADATA_YAML
+    (tmp_path / "testp.yaml").write_text(text, encoding="utf-8")
+    p = load_providers(tmp_path)["testp"]
+    assert p.strengths == "long context, strong rewrite-scale diffs"
+    assert p.suitable_modes == "code, review"
+    assert p.notes == "subscription tier required"
+
+
+def test_load_providers_metadata_absent_defaults_to_empty(tmp_path):
+    (tmp_path / "testp.yaml").write_text(VALID_PROVIDER_YAML, encoding="utf-8")
+    p = load_providers(tmp_path)["testp"]
+    assert p.strengths == ""
+    assert p.suitable_modes == ""
+    assert p.notes == ""
+
+
+def test_load_providers_metadata_flat_fallback(tmp_path, monkeypatch):
+    # The stdlib fallback parser must keep the new fields flat key:value.
+    monkeypatch.setattr(providers, "yaml", None)
+    text = VALID_PROVIDER_YAML + METADATA_YAML
+    (tmp_path / "testp.yaml").write_text(text, encoding="utf-8")
+    p = load_providers(tmp_path)["testp"]
+    assert p.strengths == "long context, strong rewrite-scale diffs"
+    assert p.suitable_modes == "code, review"
+    assert p.notes == "subscription tier required"
+
+
+def test_bundled_providers_have_strengths_and_suitable_modes():
+    # Enumerate every bundled YAML at test time.
+    yaml_files = sorted(providers.PROVIDERS_DIR.glob("*.yaml"))
+    assert yaml_files, "no bundled provider YAML files found"
+    for path in yaml_files:
+        data = _parse_yaml(path)
+        assert str(data.get("strengths", "")).strip(), (
+            f"{path.name} missing non-empty strengths"
+        )
+        assert str(data.get("suitable_modes", "")).strip(), (
+            f"{path.name} missing non-empty suitable_modes"
+        )
+    for key, p in load_providers().items():
+        assert p.strengths, f"provider {key} has empty strengths"
+        assert p.suitable_modes, f"provider {key} has empty suitable_modes"
+
+
+def test_status_json_provider_entries_include_metadata(tmp_path, monkeypatch, capsys):
+    from pilot_workers.cli import status as status_mod
+
+    monkeypatch.setenv("PILOT_WORKERS_HOME", str(tmp_path / "home"))
+    assert status_mod.main(["--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["providers"], "status --json reported no providers"
+    for key, entry in data["providers"].items():
+        for field in ("strengths", "suitable_modes", "notes"):
+            assert field in entry, (
+                f"status --json provider {key!r} missing field {field!r}"
+            )
+            assert isinstance(entry[field], str)

@@ -95,14 +95,13 @@ def readonly_shell_permissions() -> dict[str, str]:
         "find *": "allow",
         "rg *": "allow",
         "grep *": "allow",
-        "sed *": "allow",
-        "awk *": "allow",
         "head *": "allow",
         "tail *": "allow",
         "wc *": "allow",
         "file *": "allow",
         "stat *": "allow",
-        "npx tsc*": "allow",
+        "npx tsc": "allow",
+        "npx tsc *": "allow",
         "git status*": "allow",
         "git diff*": "allow",
         "git log*": "allow",
@@ -114,6 +113,34 @@ def readonly_shell_permissions() -> dict[str, str]:
         "git ls-files*": "allow",
     }
     rules.update(denied_shell_patterns())
+    # Exec-capable escapes: these run arbitrary commands from inside their own
+    # argument/script text (awk system() and |getline, sed e, find -exec, git
+    # pager/output flags), which no glob over that text can make read-only —
+    # denied outright. Interpreter/forwarder denies are explicit even though
+    # "*" already denies them, so a future allow can't silently reopen them.
+    rules.update(
+        {
+            "awk *": "deny",
+            "gawk *": "deny",
+            "sed *": "deny",
+            "perl *": "deny",
+            "python*": "deny",
+            "ruby *": "deny",
+            "node *": "deny",
+            "xargs *": "deny",
+            "sh *": "deny",
+            "bash *": "deny",
+            "zsh *": "deny",
+            "find *-exec*": "deny",
+            "find *-ok*": "deny",
+            "find *-delete*": "deny",
+            "find *-fprint*": "deny",
+            "find *-fls*": "deny",
+            "git *--output*": "deny",
+            "git grep *-O*": "deny",
+            "git grep *--open-files-in-pager*": "deny",
+        }
+    )
     rules["*>*"] = "deny"
     return rules
 
@@ -154,6 +181,11 @@ def test_shell_permissions() -> dict[str, str]:
         }
     )
     rules.update(denied_shell_patterns())
+    # Re-append the redirect deny so it stays LAST: dict.update keeps an
+    # existing key's original position, which would otherwise let
+    # "pytest > file" resolve to the later "pytest*" allow.
+    del rules["*>*"]
+    rules["*>*"] = "deny"
     return rules
 
 

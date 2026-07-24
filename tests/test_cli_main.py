@@ -81,7 +81,8 @@ def test_install_help_prints_new_grammar(capsys):
 def test_usage_mentions_new_grammar(capsys):
     assert main_mod.main([]) == 0
     out = capsys.readouterr().out
-    assert "install <provider|all> on <host|all>" in out
+    assert "install <host|all>" in out
+    assert "install <provider|all> on <host|all>" not in out
     assert "status" in out
 
 

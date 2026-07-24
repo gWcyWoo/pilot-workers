@@ -9,8 +9,9 @@ Dispatch bounded tasks to isolated LLM workers. Your main AI agent (Claude, Code
 - **Security by default**: API keys never appear in CLI args, environment variables, task contracts, or logs. Output is auto-redacted.
 - **Five modes**: `code` (edit), `explore` (read-only), `test` (run tests), `review` (read-only audit), `resume` (continue a prior code session).
 - **Pluggable runners**: the runner adapter layer (`Runner` ABC) abstracts engine-specific details. Currently ships with OpenCode; designed for future alternatives.
-- **Observable**: two-line JSON contract (`started` + `verdict`) for AI planners; human-readable `latest.log` for `tail -f`.
-- **Per-provider installs**: `install glm on claude` deploys only GLM's integration to Claude Code. Mix and match providers × hosts.
+- **Observable**: two-line JSON contract (`started` + structured `verdict` carrying `parse_state`, a per-mode `result`, and `final_text_path`) for AI planners; human-readable `latest.log` for `tail -f`.
+- **Per-run sandboxes**: every dispatch runs inside its own isolated XDG tree (`providers/<key>/runs/<run_id>/`) with a zero-copy symlink to the canonical credential and a shared per-provider cache; resume (`--session` + `--run-id`) reuses the original sandbox.
+- **Host-level playbook**: one `pilot-workers` playbook skill per host (Claude Code or Codex). `install claude` / `install codex` deploys the same engine-neutral playbook regardless of which providers you've configured.
 
 ## Install
 
@@ -29,10 +30,10 @@ pilot-workers credentials glm
 pilot-workers credentials kimi-k3
 pilot-workers credentials ds
 
-# 3. Deploy integrations to your host
-pilot-workers install all on claude    # Claude Code: 12 agents + 8 slash commands
-pilot-workers install all on codex     # Codex: $glm / $kimi / $ds skills
-pilot-workers install glm on claude    # or just one provider on one host
+# 3. Deploy the playbook skill to your host
+pilot-workers install claude    # Claude Code: pilot-workers playbook skill
+pilot-workers install codex     # Codex: same playbook skill
+pilot-workers install all       # both hosts
 
 # 4. Check everything is ready
 pilot-workers status
@@ -56,15 +57,15 @@ pilot-workers <subcommand> [args]
   dispatch         Deterministic wrapper around run (two-line JSON: started + verdict).
   fanout           Dispatch several jobs concurrently; stdout = one JSON array of verdicts.
   template         Print the task template for a mode (code|explore|test|review).
-  install          Install integrations or runner.
-                     install <provider|all> on <host|all>
+  install          Install host playbook skill or runner.
+                     install <host|all>
                      install runner <name>
-  uninstall        Remove integrations or runner.
-                     uninstall <provider|all> on <host|all>
+  uninstall        Remove host playbook skill or runner.
+                     uninstall <host|all>
                      uninstall runner <name>
   status           Show provider credentials, host installs, and runner state.
                      status [--json]
-                     status <provider> on <host>
+                     status <host>
   credentials      Configure isolated worker credentials.
   maintain         Worker log and worktree lifecycle tools.
 ```
@@ -83,20 +84,26 @@ context_tokens: 128000
 output_tokens: 8192
 # runner: opencode          # optional, default opencode
 # permissions: relaxed      # optional, reference a permission profile
-# asset_prefix: my-model    # optional, default = key; used for integration file naming
+# asset_prefix: my-model    # optional, default = key (legacy; no longer used for file naming)
+# strengths: ...            # optional, surfaced by `pilot-workers status`
+# suitable_modes: ...       # optional, surfaced by `pilot-workers status`
+# notes: ...                # optional, surfaced by `pilot-workers status`
 ```
 
-Then `pilot-workers credentials my-model` and `pilot-workers install my-model on claude`.
+Then `pilot-workers credentials my-model` and `pilot-workers install claude` (or `codex`) to deploy/refresh the host playbook skill.
 
 Reserved keys (cannot be used as provider key): `runner`, `all`, `on`, `claude`, `codex`.
 
 ## Host integration
 
-The **host** is whatever AI agent acts as the planner. `integrations/` has ready-made configs:
-- **`claude-host/`**: 12 agents (glm/kimi/ds × coder/explorer/reviewer/tester) + 8 slash commands
-- **`codex-host/`**: `$glm` / `$kimi` / `$ds` skill entry points
+The **host** is whatever AI agent acts as the planner. Each host ships ONE `pilot-workers` playbook skill (a doctrine playbook, not provider-specific syntax):
 
-Adding a new host: create `integrations/<name>-host/`, put whatever config your host needs, point it at `pilot-workers dispatch`. See `integrations/README.md`.
+- **`claude-host/skills/pilot-workers/`**: playbook skill for Claude Code (installed to `~/.claude/skills/pilot-workers/`)
+- **`codex-host/skills/pilot-workers/`**: the same playbook skill for Codex (installed to `$CODEX_HOME/skills/pilot-workers/`)
+
+`pilot-workers install <host>` copies the skill into the host's skill directory; it carries no engine-specific knowledge and is the same regardless of which providers you've configured. (The v0.4.0 12-agents + 8-commands matrix is gone.)
+
+Adding a new host: create `integrations/<name>-host/skills/pilot-workers/`, put whatever config your host needs, point it at `pilot-workers dispatch`. See `integrations/README.md`.
 
 ## Architecture
 
@@ -106,7 +113,7 @@ See [CLAUDE.md](CLAUDE.md) for the current architecture, module reference, and c
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest    # 130 tests, all offline
+.venv/bin/pytest    # 289 tests, all offline
 ```
 
 ## License

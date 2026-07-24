@@ -14,15 +14,15 @@ subcommands:
   dispatch     Deterministic outer shell around run (started + verdict JSON).
   fanout       Dispatch several jobs concurrently; stdout = one JSON array of verdicts.
   template     Print the task template for a mode (code|explore|test|review).
-  install      install <provider|all> on <host|all> | install runner <name>.
-  uninstall    uninstall <provider|all> on <host|all> | uninstall runner <name>.
+  install      install <host|all> [--target <dir>] | install runner <name>.
+  uninstall    uninstall <host|all> | uninstall runner <name>.
   status       Show provider credential/install and runner status [--json].
   credentials  Configure isolated worker credentials.
   maintain     Worker log and worktree lifecycle tools.
   runtime      Deprecated alias for 'install runner opencode'.
 
-Deprecated: 'install <host>' / 'uninstall <host>' still work as aliases for
-'<provider|all> on <host>' with provider=all.
+v0.5.0 host-level grammar; '<provider|all> on <host|all>' is no longer
+accepted.
 
 Use 'pilot-workers <subcommand> --help' for subcommand-specific help.
 """

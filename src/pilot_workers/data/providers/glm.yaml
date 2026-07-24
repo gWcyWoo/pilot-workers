@@ -9,3 +9,6 @@ base_url: https://open.bigmodel.cn/api/coding/paas/v4
 display_name: GLM 5.2 Worker
 context_tokens: 1000000
 output_tokens: 131072
+strengths: fast mechanical execution, cheap bulk edits and scaffolding
+suitable_modes: code, review
+notes: requires a Zhipu Coding Plan API key

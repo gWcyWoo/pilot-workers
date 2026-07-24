@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
 import subprocess
 import sys
 import threading
@@ -36,6 +38,16 @@ DEFAULT_TIMEOUT_S = 3600
 DEFAULT_IDLE_TIMEOUT_S = 900
 JOBS_FILE_FIELDS = {"provider", "mode", "task_file", "worktree"}
 SUCCESS_VERDICTS = ("completed", "step_capped_partial")
+
+# D4 fanout-hardening constants. All timing values are read at call time
+# (never bound at import) so tests can monkeypatch them per-test.
+HARVEST_ALLOWANCE_SECONDS = 5.0
+MAX_EPILOGUE_SECONDS = 30.0
+WATCHDOG_POLL_INTERVAL = 0.05
+# Heartbeat lines emitted by dispatch.py's epilogue are excluded from the
+# captured stderr_tail. Kept as a literal here to avoid a cross-module
+# dependency for a single string.
+HEARTBEAT_LINE_PREFIX = "pilot-workers-heartbeat"
 
 
 @dataclass
@@ -112,7 +124,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_IDLE_TIMEOUT_S,
         help=f"Per-job idle limit in seconds (default {DEFAULT_IDLE_TIMEOUT_S}).",
     )
-    return parser.parse_args(argv)
+    parsed = parser.parse_args(argv)
+    if parsed.max_parallel is not None and parsed.max_parallel < 1:
+        parser.error("--max-parallel must be >= 1")
+    return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -267,30 +282,175 @@ def _build_dispatch_command(
 
 
 def _synthesized_verdict(
-    job: Job, exit_code: Any, stderr_tail: str, interrupted: bool = False
+    job: Job,
+    exit_code: Any,
+    stderr_tail: str,
+    reason: str = "crash",
 ) -> dict[str, Any]:
-    verdict: dict[str, Any] = {
+    """Build a full v2-shape synthesized verdict (D3/D4).
+
+    ``reason`` is the killer enum (``crash|timeout|idle_timeout|interrupted``);
+    it is the only field consumers read on a synthesized verdict. Real child
+    verdicts are never produced by this function.
+    """
+    return {
         "job": job.label,
         "type": "worker_runner.verdict",
+        "schema_version": 2,
         "verdict": "error",
         "synthesized": True,
+        "reason": reason,
         "exit_code": exit_code,
         "stderr_tail": stderr_tail,
+        "parse_state": "unavailable",
+        "result": None,
+        "final_text_path": None,
     }
-    if interrupted:
-        verdict["interrupted"] = True
-    return verdict
+
+
+def _compute_deadline(timeout_s: int) -> float | None:
+    """Deadline = timeout + grace + harvest allowance, or None if unbounded.
+
+    All timing constants are read at call time so tests can monkeypatch them
+    per-test (the import-time value is never bound).
+    """
+    if timeout_s == 0:
+        return None
+    return (
+        timeout_s
+        + runtime.TERMINATE_GRACE_SECONDS
+        + HARVEST_ALLOWANCE_SECONDS
+    )
+
+
+def _kill_job_group(proc: Any) -> None:
+    """SIGTERM the child's process group, wait the grace period, then SIGKILL.
+
+    The child was spawned with ``start_new_session=True`` so its PID equals its
+    PGID. ``ProcessLookupError`` is swallowed (race between poll and kill).
+    Best-effort: never raises.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError:
+        return
+    try:
+        proc.wait(timeout=runtime.TERMINATE_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            pass
+    except Exception:
+        pass
+
+
+def _watchdog_job(
+    index: int,
+    proc: Any,
+    deadline: float,
+    last_activity: list[float],
+    reasons: list[str | None],
+) -> None:
+    """Per-job watchdog thread. Polls read-only; never touches pipes.
+
+    After ``deadline``: kill when stdout/stderr silent >=
+    ``runtime.TERMINATE_GRACE_SECONDS``. Absolute ceiling
+    ``deadline + MAX_EPILOGUE_SECONDS`` kills regardless of activity.
+    ``reasons[index]`` is set to ``"timeout"`` BEFORE the kill.
+    """
+    absolute_ceiling = deadline + MAX_EPILOGUE_SECONDS
+    while True:
+        if proc.poll() is not None:
+            return
+        now = time.monotonic()
+        if now >= absolute_ceiling:
+            if reasons[index] is None:
+                reasons[index] = "timeout"
+            _kill_job_group(proc)
+            return
+        if now >= deadline:
+            silence = now - last_activity[index]
+            if silence >= runtime.TERMINATE_GRACE_SECONDS:
+                if reasons[index] is None:
+                    reasons[index] = "timeout"
+                _kill_job_group(proc)
+                return
+        time.sleep(WATCHDOG_POLL_INTERVAL)
+
+
+def _install_signal_handlers(
+    procs: list[Any],
+    reasons: list[str | None],
+) -> tuple[list[bool], dict[int, Any]]:
+    """Install SIGINT+SIGTERM handlers that record reason then killpg each
+    tracked running child group.
+
+    On the first SIGINT the handler sets the shared interrupted flag, writes
+    ``reasons[i] = "interrupted"`` for every still-running tracked job (BEFORE
+    killing), and SIGTERM/SIGKILL-reaps the group. A second SIGINT restores
+    ``signal.SIG_DFL`` (hard-kill escape). SIGTERM uses the same body but
+    never escalates the escape. Handlers return (no ``sys.exit``) so the
+    one-JSON-array stdout contract holds.
+
+    Returns ``(interrupted_flag, previous_handlers)`` so the caller can read
+    the flag and restore the previous handlers in a ``finally``.
+    """
+    interrupted = [False]
+    state = {"sigint_seen": False}
+    previous = {
+        signal.SIGINT: signal.getsignal(signal.SIGINT),
+        signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+    }
+
+    def _handler(signum: int, frame: Any) -> None:
+        # Second SIGINT restores SIG_DFL (hard-kill escape hatch).
+        if signum == signal.SIGINT:
+            if state["sigint_seen"]:
+                signal.signal(signal.SIGINT, signal.SIG_DFL)
+                return
+            state["sigint_seen"] = True
+        interrupted[0] = True
+        # WRITE ORDER INVARIANT: reason is recorded BEFORE any killpg.
+        for i, proc in enumerate(procs):
+            if proc is None:
+                continue
+            try:
+                if proc.poll() is not None:
+                    continue
+            except Exception:
+                continue
+            if reasons[i] is None:
+                reasons[i] = "interrupted"
+            _kill_job_group(proc)
+
+    signal.signal(signal.SIGINT, _handler)
+    signal.signal(signal.SIGTERM, _handler)
+    return interrupted, previous
 
 
 def _run_job(
     index: int,
     job: Job,
     cmd: list[str],
+    timeout_s: int,
     results: list[dict[str, Any] | None],
     procs: list[Any],
+    reasons: list[str | None],
+    last_activity: list[float],
+    interrupted: list[bool],
     stderr_lock: threading.Lock,
 ) -> None:
-    """Run one dispatch child; never raises out -- always records a verdict."""
+    """Run one dispatch child; never raises out -- always records a verdict.
+
+    Single-writer rule: this is the ONLY writer of ``results[index]`` while
+    the pool is alive. Killers (signal handler, watchdog) only touch
+    ``reasons[index]`` and the proc itself.
+    """
     proc = None
     try:
         proc = subprocess.Popen(
@@ -299,20 +459,48 @@ def _run_job(
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            start_new_session=True,
         )
         procs[index] = proc
+        spawn_time = time.monotonic()
+        last_activity[index] = spawn_time
+
+        # Spawn race: if a signal arrived between Popen and procs[index]=proc,
+        # the handler could not see this proc. Re-check and kill immediately.
+        if interrupted[0]:
+            if reasons[index] is None:
+                reasons[index] = "interrupted"
+            _kill_job_group(proc)
+
+        # _compute_deadline returns the offset; anchor at spawn_time so the
+        # watchdog compares against time.monotonic() in the same frame.
+        deadline_offset = _compute_deadline(timeout_s)
+        deadline = (
+            spawn_time + deadline_offset if deadline_offset is not None else None
+        )
 
         stderr_chunks: list[str] = []
 
         def _drain_stderr() -> None:
             try:
-                assert proc.stderr is not None
-                stderr_chunks.append(proc.stderr.read())
+                assert proc is not None and proc.stderr is not None
+                for raw in proc.stderr:
+                    # Heartbeat lines AND any stderr line count as activity.
+                    last_activity[index] = time.monotonic()
+                    stderr_chunks.append(raw)
             except Exception:
                 pass
 
         drain = threading.Thread(target=_drain_stderr, daemon=True)
         drain.start()
+
+        if deadline is not None:
+            watchdog = threading.Thread(
+                target=_watchdog_job,
+                args=(index, proc, deadline, last_activity, reasons),
+                daemon=True,
+            )
+            watchdog.start()
 
         started_seen = False
         last_line = ""
@@ -321,6 +509,7 @@ def _run_job(
             line = raw_line.rstrip("\n")
             if not line:
                 continue
+            last_activity[index] = time.monotonic()
             if not started_seen:
                 started_seen = True
                 try:
@@ -338,25 +527,48 @@ def _run_job(
             last_line = line
         proc.wait()
         drain.join(timeout=5)
-        stderr_text = "".join(stderr_chunks)
 
+        # Build stderr_tail: drop heartbeat lines, then take last 500 chars.
+        filtered = [
+            chunk for chunk in stderr_chunks
+            if not chunk.startswith(HEARTBEAT_LINE_PREFIX)
+        ]
+        stderr_tail = "".join(filtered)[-500:]
+
+        # Reason precedence: a real child verdict line wins verbatim; the
+        # recorded reason (if any) is logged to stderr ONLY. The verdict line
+        # is identified by type; a captured started event does NOT count.
         verdict: dict[str, Any] | None = None
         if last_line:
             try:
                 parsed = json.loads(last_line)
             except json.JSONDecodeError:
                 parsed = None
-            if isinstance(parsed, dict):
+            if (
+                isinstance(parsed, dict)
+                and parsed.get("type") == "worker_runner.verdict"
+            ):
                 parsed["job"] = job.label
                 verdict = parsed
+        # Log the recorded reason to stderr regardless of whether the real
+        # verdict wins: consumers read reason only on synthesized verdicts,
+        # but the operator gets the diagnostic either way.
+        if reasons[index] is not None:
+            with stderr_lock:
+                sys.stderr.write(
+                    f"fanout: {job.label} recorded reason: "
+                    f"{reasons[index]}\n"
+                )
+                sys.stderr.flush()
         if verdict is None:
+            reason = reasons[index] or "crash"
             verdict = _synthesized_verdict(
-                job, proc.returncode, stderr_text[-500:]
+                job, proc.returncode, stderr_tail, reason=reason,
             )
         results[index] = verdict
     except Exception as exc:  # the array must always be printed
         results[index] = _synthesized_verdict(
-            job, getattr(proc, "returncode", None), str(exc)[-500:]
+            job, getattr(proc, "returncode", None), str(exc)[-500:],
         )
 
 
@@ -375,9 +587,11 @@ def run_fanout(args: argparse.Namespace) -> int:
     max_workers = args.max_parallel or len(jobs)
     results: list[dict[str, Any] | None] = [None] * len(jobs)
     procs: list[Any] = [None] * len(jobs)
+    reasons: list[str | None] = [None] * len(jobs)
+    last_activity: list[float] = [0.0] * len(jobs)
     stderr_lock = threading.Lock()
-    interrupted = False
 
+    interrupted, previous_handlers = _install_signal_handlers(procs, reasons)
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [
@@ -388,41 +602,44 @@ def run_fanout(args: argparse.Namespace) -> int:
                     _build_dispatch_command(
                         job, args.workdir, args.timeout, args.idle_timeout
                     ),
+                    args.timeout,
                     results,
                     procs,
+                    reasons,
+                    last_activity,
+                    interrupted,
                     stderr_lock,
                 )
                 for index, job in enumerate(jobs)
             ]
             for future in futures:
                 future.result()
-    except KeyboardInterrupt:
-        interrupted = True
-        # Children received SIGINT via the process group and self-terminate;
-        # give them a bounded grace period to reap.
-        deadline = time.monotonic() + runtime.TERMINATE_GRACE_SECONDS + 5
-        for proc in procs:
-            if proc is None:
-                continue
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                proc.wait(timeout=remaining)
-            except Exception:
-                pass
+    finally:
+        signal.signal(signal.SIGINT, previous_handlers[signal.SIGINT])
+        signal.signal(signal.SIGTERM, previous_handlers[signal.SIGTERM])
 
+    # Post-pool single-threaded backfill for never-started/cancelled slots
+    # (exempt from the single-writer rule: all _run_job threads have joined).
     for index, job in enumerate(jobs):
         if results[index] is None:
-            results[index] = _synthesized_verdict(job, None, "", interrupted)
+            reason = reasons[index]
+            if reason is None:
+                reason = "interrupted" if interrupted[0] else "crash"
+            results[index] = _synthesized_verdict(job, None, "", reason=reason)
 
     final: list[dict[str, Any]] = [r for r in results if r is not None]
     sys.stdout.write(json.dumps(final, ensure_ascii=False) + "\n")
     sys.stdout.flush()
 
-    if interrupted:
+    if interrupted[0]:
         return 1
-    if all(r.get("verdict") in SUCCESS_VERDICTS for r in final):
+    if all(
+        r.get("verdict") in SUCCESS_VERDICTS
+        and not r.get("timed_out")
+        and not r.get("idle_timed_out")
+        and not r.get("interrupted")
+        for r in final
+    ):
         return 0
     return 1
 

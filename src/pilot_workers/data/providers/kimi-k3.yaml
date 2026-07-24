@@ -10,3 +10,6 @@ base_url: https://api.kimi.com/coding/v1
 display_name: Kimi K3 Worker
 context_tokens: 1048576
 output_tokens: 1048576
+strengths: large context, contract-grade precision; coding, review, exploration
+suitable_modes: code, review, explore
+notes: requires a Kimi Code subscription (Moderato tier or above)

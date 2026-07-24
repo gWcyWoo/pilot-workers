@@ -44,6 +44,11 @@ class Provider:
     permissions: str | None = None
     runner: str = "opencode"
     asset_prefix: str = ""
+    # v0.5.0 (design D1): optional flat metadata surfaced by `status` and
+    # consulted when picking a provider for a mode. All default to "".
+    strengths: str = ""
+    suitable_modes: str = ""
+    notes: str = ""
 
     @property
     def model(self) -> str:
@@ -112,6 +117,9 @@ def load_providers(providers_dir: Path | None = None) -> dict[str, Provider]:
             permissions=data.get("permissions") or None,
             runner=data.get("runner") or "opencode",
             asset_prefix=data.get("asset_prefix") or data["key"],
+            strengths=str(data.get("strengths") or ""),
+            suitable_modes=str(data.get("suitable_modes") or ""),
+            notes=str(data.get("notes") or ""),
         )
         if provider.key in providers:
             raise RuntimeError(f"duplicate provider key: {provider.key}")
@@ -149,6 +157,22 @@ def profile_paths(provider: Provider) -> dict[str, Path]:
         "data": root / "data",
         "state": root / "state",
         "cache": root / "cache",
+    }
+
+
+def runs_root(provider: Provider) -> Path:
+    return profile_root(provider) / "runs"
+
+
+def run_paths(provider: Provider, run_id: str) -> dict[str, Path]:
+    root = runs_root(provider) / run_id
+    return {
+        "root": root,
+        "config": root / "config",
+        "data": root / "data",
+        "state": root / "state",
+        "cache": root / "cache",
+        "lock": root / ".lock",
     }
 
 

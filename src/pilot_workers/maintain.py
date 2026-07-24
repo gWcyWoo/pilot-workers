@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import time
 
-from pilot_workers import providers
+from pilot_workers import providers, runtime
 
 
 def _run_pairs(logs_dir: Path) -> list[list[Path]]:
@@ -39,6 +40,8 @@ def _run_pairs(logs_dir: Path) -> list[list[Path]]:
             run_id = name[len("rendered-") : -len(".log")]
         elif name.endswith(".verdict.json"):
             run_id = name[: -len(".verdict.json")]
+        elif name.endswith(".report.md"):
+            run_id = name[: -len(".report.md")]
         if run_id is None:
             continue
         groups.setdefault(run_id, []).append(path)
@@ -70,6 +73,93 @@ def cleanup_logs(older_than_days: int, provider_keys: list[str]) -> int:
             for path in sorted(paths):
                 print(f"delete {path}")
                 path.unlink()
+                removed += 1
+    print(f"removed {removed} file(s)")
+    return 0
+
+
+def _reap_sandbox(root: Path) -> int:
+    """Delete one run sandbox tree, lstat-walking it bottom-up.
+
+    Symlinks are unlinked as links and NEVER followed (the canonical
+    credential, the shared provider cache, and any worker-created symlink
+    pointing outside the sandbox all survive); bare shutil.rmtree is
+    deliberately not used. Every deletion is printed. Returns the number of
+    entries removed.
+    """
+    if root.is_symlink():
+        raise RuntimeError(f"refusing to reap a symlinked sandbox root: {root}")
+    removed = 0
+    for dirpath, dirnames, filenames in os.walk(root, topdown=False, followlinks=False):
+        current = Path(dirpath)
+        for name in filenames:
+            target = current / name
+            print(f"delete {target}")
+            target.unlink()
+            removed += 1
+        for name in dirnames:
+            target = current / name
+            print(f"delete {target}")
+            if target.is_symlink():
+                target.unlink()
+            else:
+                target.rmdir()
+            removed += 1
+    print(f"delete {root}")
+    root.rmdir()
+    removed += 1
+    return removed
+
+
+def _run_log_files(provider: providers.Provider, run_id: str) -> list[Path]:
+    """All log/report artifacts belonging to one run id."""
+    logs_dir = providers.logs_root(provider)
+    names = [
+        f"{run_id}.jsonl",
+        f"{run_id}.stderr.log",
+        f"rendered-{run_id}.log",
+        f"{run_id}.verdict.json",
+        f"{run_id}.report.md",
+    ]
+    return [logs_dir / name for name in names if (logs_dir / name).is_file()]
+
+
+def cleanup_runs(older_than_days: int, provider_keys: list[str], keep: int = 1) -> int:
+    """Reap run sandboxes older than the cutoff plus their log artifacts.
+
+    Keeps each provider's ``keep`` newest sandboxes regardless of age and
+    skips any sandbox holding a live (non-stale) run lock.
+    """
+    if older_than_days < 1:
+        raise RuntimeError("--older-than-days must be >= 1")
+    if keep < 1:
+        raise RuntimeError("--keep must be >= 1")
+    cutoff = time.time() - older_than_days * 86400
+    removed = 0
+    for key in provider_keys:
+        provider = providers.PROVIDERS[key]
+        sandboxes_root = providers.runs_root(provider)
+        if not sandboxes_root.is_dir():
+            continue
+        sandboxes = sorted(
+            (entry for entry in sandboxes_root.iterdir()
+             if entry.is_dir() and not entry.is_symlink()),
+            key=lambda entry: entry.stat().st_mtime,
+            reverse=True,
+        )
+        for index, sandbox in enumerate(sandboxes):
+            if index < keep:
+                continue
+            if sandbox.stat().st_mtime >= cutoff:
+                continue
+            lock = runtime.read_run_lock(sandbox)
+            if lock is not None and not runtime.lock_is_stale(lock):
+                print(f"{key}: {sandbox.name} skipping (live)")
+                continue
+            removed += _reap_sandbox(sandbox)
+            for log_path in _run_log_files(provider, run_id=sandbox.name):
+                print(f"delete {log_path}")
+                log_path.unlink()
                 removed += 1
     print(f"removed {removed} file(s)")
     return 0
@@ -146,6 +236,11 @@ def parse_args() -> argparse.Namespace:
     logs.add_argument("--older-than-days", type=int, required=True)
     logs.add_argument("--provider", choices=sorted(providers.PROVIDERS), default=None)
 
+    runs = commands.add_parser("runs", help="Delete old run sandboxes plus their logs (keeps the newest per provider).")
+    runs.add_argument("--older-than-days", type=int, required=True)
+    runs.add_argument("--keep", type=int, default=1)
+    runs.add_argument("--provider", choices=sorted(providers.PROVIDERS), default=None)
+
     worktrees = commands.add_parser("worktrees", help="List or safely remove detached worktrees.")
     actions = worktrees.add_subparsers(dest="action", required=True)
     actions.add_parser("list", help="Show every worker worktree with dirty/integration state.")
@@ -161,6 +256,9 @@ def main() -> int:
         if args.command == "logs":
             keys = [args.provider] if args.provider else sorted(providers.PROVIDERS)
             return cleanup_logs(args.older_than_days, keys)
+        if args.command == "runs":
+            keys = [args.provider] if args.provider else sorted(providers.PROVIDERS)
+            return cleanup_runs(args.older_than_days, keys, keep=args.keep)
         if args.action == "list":
             return list_worktrees()
         return remove_worktree(args.path)

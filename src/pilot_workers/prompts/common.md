@@ -14,11 +14,15 @@ Permission preview — these command classes are denied at the permission layer,
 
 A blocked call returns a permission error once; never retry it verbatim.
 
-Final report — end with exactly these four sections:
+Final report — write exactly these four sections:
 
 1. `STATUS`: complete, incomplete, or blocked.
 2. `FILES_CHANGED`: exact paths with a one-line purpose each, or `none`.
 3. `VALIDATION`: the commands you ran and their verbatim key output (counts, failing test names, error text). Quote real output; never paraphrase it.
 4. `REMAINING_RISKS`: unmet boundaries, assumptions, pre-existing problems you noticed but did not touch, or `none`.
+
+After these four sections, finish with the mode's PILOT_RESULT block (see the
+mode instructions); the block is the very last thing in your reply — nothing
+after it.
 
 The main planner will independently review and verify your work; your completion claim is not the acceptance decision.

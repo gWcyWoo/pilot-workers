@@ -67,7 +67,8 @@ def test_validate_resume_with_worktree_raises():
 
 
 def test_validate_resume_with_session_ok():
-    run_mod.validate_mode_arguments(_args(mode="resume", session="s-1"))
+    run_mod.validate_mode_arguments(
+        _args(mode="resume", session="s-1", run_id="r-1"))
 
 
 def test_dry_run_summary_default_permission_profile(tmp_path, monkeypatch):

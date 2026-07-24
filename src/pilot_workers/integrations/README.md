@@ -4,8 +4,8 @@ Each subdirectory contains config files for one **host** — the AI agent that a
 
 ```
 integrations/
-├── claude-host/     ← Claude Code (agents + slash commands)
-├── codex-host/      ← Codex (skills)
+├── claude-host/     ← Claude Code (one pilot-workers playbook skill)
+├── codex-host/      ← Codex (one pilot-workers playbook skill)
 └── <your-host>/     ← add your own
 ```
 

@@ -43,6 +43,10 @@ def validate_mode_arguments(args: argparse.Namespace) -> None:
         raise RuntimeError("--session is only valid with --mode resume")
     if args.mode == "resume" and args.worktree:
         raise RuntimeError("resume the previously reported work directory; do not create a new worktree")
+    if args.mode == "resume" and not args.run_id:
+        raise RuntimeError("--run-id is required when --mode resume is used")
+    if args.mode != "resume" and args.run_id:
+        raise RuntimeError("--run-id is only valid with --mode resume")
 
 
 def dry_run_summary(provider: providers.Provider, mode: str, workdir: Path, *, permission_profile: str | None = None) -> dict:
@@ -80,6 +84,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     task_group.add_argument("--task", help="Short task contract as a string.")
     task_group.add_argument("--task-file", help="UTF-8 file containing the task contract.")
     parser.add_argument("--session", help="Session ID for resume mode.")
+    parser.add_argument("--run-id", help="Run ID of the original run (resume mode only).")
     parser.add_argument("--worktree", action="store_true", help="Create a detached worktree from HEAD.")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S)
     parser.add_argument("--idle-timeout", type=int, default=DEFAULT_IDLE_TIMEOUT_S)
@@ -111,77 +116,95 @@ def main(argv: list[str] | None = None) -> int:
             workdir = runtime.create_detached_worktree(workdir, providers.worktrees_root())
 
         config = runner.build_config(provider, args.mode, permission_profile=args.permissions)
-        env = runtime.build_environment(provider, runner.runner_environment(provider, config))
         logs = providers.logs_root(provider)
         runtime.ensure_private_directory(logs)
         run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(4)}"
-        log_path = logs / f"{run_id}.jsonl"
-        stderr_path = logs / f"{run_id}.stderr.log"
-        agent = policy.MODE_TO_AGENT[args.mode]
-        prompt = runner.format_task_input(task, args.mode)
-        command = runner.build_command(binary, provider, args.mode, workdir, run_id, args.session)
-
+        if args.mode == "resume":
+            if "/" in args.run_id or "\\" in args.run_id or args.run_id.startswith("."):
+                raise RuntimeError(f"invalid --run-id (path separators/leading dot not allowed): {args.run_id}")
+            sandbox = providers.run_paths(provider, args.run_id)
+            if not sandbox["root"].is_dir():
+                raise RuntimeError(
+                    "session expired past retention; redispatch cold: "
+                    f"{sandbox['root']}"
+                )
+            runtime.acquire_run_lock(sandbox["root"])
+        else:
+            sandbox = runtime.provision_run_sandbox(provider, run_id, runner)
         try:
-            renderer = fmt_events.FmtWriter(logs, provider.key, run_id, os.getpid())
-        except Exception as exc:
-            print(f"note: live log rendering unavailable ({exc})", file=sys.stderr)
-            renderer = None
+            env = runtime.build_environment(
+                provider, runner.runner_environment(provider, config, paths=sandbox),
+                paths=sandbox,
+            )
+            log_path = logs / f"{run_id}.jsonl"
+            stderr_path = logs / f"{run_id}.stderr.log"
+            agent = policy.MODE_TO_AGENT[args.mode]
+            prompt = runner.format_task_input(task, args.mode)
+            command = runner.build_command(binary, provider, args.mode, workdir, run_id, args.session)
 
-        started = {
-            "type": "worker_runner.started",
-            "provider": provider.key,
-            "runner": provider.runner,
-            "model": provider.model,
-            "mode": args.mode,
-            "agent": agent,
-            "run_id": run_id,
-            "workdir": str(workdir),
-            "log": str(log_path),
-            "stderr_log": str(stderr_path),
-            "rendered_log": str(logs / "latest.log") if renderer else None,
-            "timeout_s": args.timeout,
-            "idle_timeout_s": args.idle_timeout,
-        }
-        print(json.dumps(started), flush=True)
-        if renderer is not None:
             try:
-                renderer.write_event(started)
+                renderer = fmt_events.FmtWriter(logs, provider.key, run_id, os.getpid())
             except Exception as exc:
-                print(f"note: live log rendering disabled ({exc})", file=sys.stderr)
+                print(f"note: live log rendering unavailable ({exc})", file=sys.stderr)
                 renderer = None
 
-        result = runtime.run_process(
-            command, env, prompt, log_path, stderr_path, secret,
-            renderer=renderer, timeout_s=args.timeout, idle_timeout_s=args.idle_timeout,
-            runner=runner,
-        )
-        secret = ""
-        summary = {
-            "type": "worker_runner.summary",
-            "provider": provider.key,
-            "runner": provider.runner,
-            "model": provider.model,
-            "mode": args.mode,
-            "agent": agent,
-            "run_id": run_id,
-            "session_id": result.session_id or args.session,
-            "workdir": str(workdir),
-            "log": str(log_path),
-            "stderr_log": str(stderr_path),
-            "rendered_log": started["rendered_log"],
-            "timed_out": result.timed_out,
-            "idle_timed_out": result.idle_timed_out,
-            "interrupted": result.interrupted,
-            "exit_code": result.exit_code,
-        }
-        print(json.dumps(summary))
-        if renderer is not None:
-            try:
-                renderer.write_event(summary)
-                renderer.finalize()
-            except Exception as exc:
-                print(f"note: live log rendering disabled ({exc})", file=sys.stderr)
-        return result.exit_code
+            started = {
+                "type": "worker_runner.started",
+                "provider": provider.key,
+                "runner": provider.runner,
+                "model": provider.model,
+                "mode": args.mode,
+                "agent": agent,
+                "run_id": run_id,
+                "workdir": str(workdir),
+                "log": str(log_path),
+                "stderr_log": str(stderr_path),
+                "rendered_log": str(logs / "latest.log") if renderer else None,
+                "timeout_s": args.timeout,
+                "idle_timeout_s": args.idle_timeout,
+            }
+            print(json.dumps(started), flush=True)
+            if renderer is not None:
+                try:
+                    renderer.write_event(started)
+                except Exception as exc:
+                    print(f"note: live log rendering disabled ({exc})", file=sys.stderr)
+                    renderer = None
+
+            result = runtime.run_process(
+                command, env, prompt, log_path, stderr_path, secret,
+                renderer=renderer, timeout_s=args.timeout, idle_timeout_s=args.idle_timeout,
+                runner=runner,
+            )
+            secret = ""
+            summary = {
+                "type": "worker_runner.summary",
+                "provider": provider.key,
+                "runner": provider.runner,
+                "model": provider.model,
+                "mode": args.mode,
+                "agent": agent,
+                "run_id": run_id,
+                "session_id": result.session_id or args.session,
+                "workdir": str(workdir),
+                "log": str(log_path),
+                "stderr_log": str(stderr_path),
+                "rendered_log": started["rendered_log"],
+                "timed_out": result.timed_out,
+                "idle_timed_out": result.idle_timed_out,
+                "interrupted": result.interrupted,
+                "exit_code": result.exit_code,
+            }
+            print(json.dumps(summary))
+            if renderer is not None:
+                try:
+                    renderer.write_event(summary)
+                    renderer.finalize()
+                except Exception as exc:
+                    print(f"note: live log rendering disabled ({exc})", file=sys.stderr)
+            return result.exit_code
+        finally:
+            runtime.release_run_lock(sandbox["root"])
     except (OSError, RuntimeError, UnicodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

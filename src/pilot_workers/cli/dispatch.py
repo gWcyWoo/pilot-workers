@@ -25,6 +25,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 from typing import Any
 
 from pilot_workers import policy
@@ -34,8 +35,13 @@ from pilot_workers.runners import RUNNERS, Runner, get_runner
 DEFAULT_TIMEOUT_S = 3600
 DEFAULT_IDLE_TIMEOUT_S = 900
 DISPATCH_ERROR_EXIT = 2
-VERDICT_SCHEMA_VERSION = 1
+VERDICT_SCHEMA_VERSION = 2
 EMPTY_FINAL_TEXT_THRESHOLD = 200
+RESULT_BEGIN = "<!--PILOT_RESULT_BEGIN-->"
+RESULT_END = "<!--PILOT_RESULT_END-->"
+NO_MODEL_OUTPUT_SENTINEL = "no model output"
+HEARTBEAT_LINE_PREFIX = "pilot-workers-heartbeat"
+EPILOGUE_HEARTBEAT_SECONDS = 5
 
 DISPATCH_ARG_NAMES = (
     "provider",
@@ -43,6 +49,7 @@ DISPATCH_ARG_NAMES = (
     "task",
     "task_file",
     "session",
+    "run_id",
     "worktree",
     "timeout",
     "idle_timeout",
@@ -96,6 +103,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--session",
         default=argparse.SUPPRESS,
         help="OpenCode session ID (resume mode only).",
+    )
+    parser.add_argument(
+        "--run-id",
+        default=argparse.SUPPRESS,
+        help="Run ID of the original run (resume mode only).",
     )
     parser.add_argument(
         "--worktree",
@@ -215,6 +227,145 @@ def parse_jsonl(path: Path, runner: Runner) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Structured result extraction (D3)
+# ---------------------------------------------------------------------------
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_str_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _validate_explore_result(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    facts = payload.get("facts")
+    if not isinstance(facts, list):
+        return False
+    for fact in facts:
+        if not isinstance(fact, dict):
+            return False
+        if not isinstance(fact.get("fact"), str):
+            return False
+        if not isinstance(fact.get("file_line"), str):
+            return False
+    if not isinstance(payload.get("truncated"), bool):
+        return False
+    return _is_str_list(payload.get("more_in"))
+
+
+def _validate_code_result(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if not isinstance(payload.get("status"), str):
+        return False
+    if not _is_str_list(payload.get("files_changed")):
+        return False
+    validation = payload.get("validation")
+    if not isinstance(validation, dict):
+        return False
+    commands = validation.get("commands")
+    if not isinstance(commands, list):
+        return False
+    for command in commands:
+        if not isinstance(command, dict):
+            return False
+        if not isinstance(command.get("cmd"), str):
+            return False
+        if not _is_int(command.get("exit_code")):
+            return False
+        if not isinstance(command.get("output_summary"), str):
+            return False
+    if not isinstance(validation.get("passed"), bool):
+        return False
+    return isinstance(payload.get("remaining_risks"), str)
+
+
+def _validate_test_result(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if not isinstance(payload.get("command"), str):
+        return False
+    if not _is_int(payload.get("passed")):
+        return False
+    if not _is_int(payload.get("failed")):
+        return False
+    failures = payload.get("failures")
+    if not isinstance(failures, list):
+        return False
+    for failure in failures:
+        if not isinstance(failure, dict):
+            return False
+        if not isinstance(failure.get("test"), str):
+            return False
+        if not isinstance(failure.get("error"), str):
+            return False
+    return True
+
+
+def _validate_review_result(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if not isinstance(payload.get("overall"), str):
+        return False
+    severity_counts = payload.get("severity_counts")
+    if not isinstance(severity_counts, dict):
+        return False
+    for key in ("high", "medium", "low"):
+        if not _is_int(severity_counts.get(key)):
+            return False
+    findings = payload.get("findings")
+    if not isinstance(findings, list):
+        return False
+    for finding in findings:
+        if not isinstance(finding, dict):
+            return False
+        for key in ("severity", "file_line", "summary", "impact", "suggested_fix"):
+            if not isinstance(finding.get(key), str):
+                return False
+    return True
+
+
+_RESULT_VALIDATORS = {
+    "explore": _validate_explore_result,
+    "code": _validate_code_result,
+    "test": _validate_test_result,
+    "review": _validate_review_result,
+    "resume": _validate_code_result,
+}
+
+
+def extract_result(
+    final_text: str, mode: str
+) -> tuple[str, dict[str, Any] | None]:
+    """Extract the structured result block from the final text event.
+
+    Returns ``(parse_state, result)``: ``("parsed", dict)`` when the last
+    RESULT_BEGIN..RESULT_END block holds JSON that validates against the
+    per-mode schema; ``("unstructured", None)`` when a block exists but is
+    not valid; ``("unavailable", None)`` when no RESULT_BEGIN marker exists.
+    """
+    begin = final_text.rfind(RESULT_BEGIN)
+    if begin == -1:
+        return "unavailable", None
+    content_start = begin + len(RESULT_BEGIN)
+    end = final_text.rfind(RESULT_END)
+    if end == -1 or end < content_start:
+        return "unstructured", None
+    try:
+        payload = json.loads(final_text[content_start:end])
+    except json.JSONDecodeError:
+        return "unstructured", None
+    validator = _RESULT_VALIDATORS.get(mode)
+    if validator is None or not validator(payload):
+        return "unstructured", None
+    return "parsed", payload
+
+
+# ---------------------------------------------------------------------------
 # Verdict
 # ---------------------------------------------------------------------------
 
@@ -223,9 +374,14 @@ def classify_verdict(
     parsed: dict[str, Any],
     step_cap: int,
     summary: dict[str, Any] | None,
+    parse_state: str,
 ) -> str:
     """Apply the fixed-order verdict rules; first match wins."""
     final_text = parsed["final_text"]
+    if parsed["steps"] >= step_cap:
+        return "step_capped_partial"
+    if parse_state == "parsed":
+        return "completed"
     if summary is not None:
         exit_code = summary.get("exit_code")
         if (
@@ -238,11 +394,9 @@ def classify_verdict(
     else:
         if parsed["has_error_event"] and len(final_text) < EMPTY_FINAL_TEXT_THRESHOLD:
             return "error"
-    if parsed["steps"] >= step_cap:
-        return "step_capped_partial"
-    if len(final_text) < EMPTY_FINAL_TEXT_THRESHOLD:
-        return "empty"
-    return "completed"
+    if len(final_text) >= EMPTY_FINAL_TEXT_THRESHOLD:
+        return "completed"
+    return "empty"
 
 
 def build_verdict(
@@ -256,9 +410,11 @@ def build_verdict(
     jsonl_path: str,
     stderr_path: str | None,
     step_cap: int,
+    report_path: str | None = None,
 ) -> dict[str, Any]:
-    verdict = classify_verdict(parsed, step_cap, summary)
     final_text = parsed["final_text"]
+    parse_state, result = extract_result(final_text, mode)
+    verdict = classify_verdict(parsed, step_cap, summary, parse_state)
     if summary is not None:
         exit_code: Any = summary.get("exit_code")
         timed_out = bool(summary.get("timed_out"))
@@ -290,30 +446,46 @@ def build_verdict(
         "tokens": parsed["tokens"],
         "tool_errors": parsed["tool_errors"],
         "final_text_len": len(final_text),
-        "final_text": final_text,
+        "parse_state": parse_state,
+        "result": result,
+        "final_text_path": report_path,
         "jsonl_path": jsonl_path,
         "stderr_path": stderr_path,
         "session_id": session_id,
     }
 
 
-def write_verdict_file(path: Path, verdict: dict[str, Any]) -> None:
-    """Write the verdict JSON to disk with 0600 permissions."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically (temp file + fsync + replace).
+
+    The final file is chmod 0600 after the replace; no temp files are left
+    behind on success or failure.
+    """
+    temporary_name: str | None = None
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(verdict, ensure_ascii=False))
-            handle.write("\n")
-    except Exception:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        raise
-    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent,
+            prefix=path.name + ".", suffix=".tmp", delete=False,
+        ) as temporary:
+            temporary_name = temporary.name
+            temporary.write(text)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_name, path)
         os.chmod(path, 0o600)
-    except OSError:
-        pass
+    finally:
+        if temporary_name and os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+
+
+def write_verdict_file(path: Path, verdict: dict[str, Any]) -> None:
+    """Write the verdict JSON to disk atomically with 0600 permissions."""
+    _atomic_write_text(path, json.dumps(verdict, ensure_ascii=False) + "\n")
+
+
+def write_report_file(path: Path, final_text: str) -> None:
+    """Write the report markdown verbatim (no added newline), 0600, atomic."""
+    _atomic_write_text(path, final_text)
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +508,13 @@ def run_reparse(jsonl_arg: str, mode: str, runner_name: str = "opencode") -> int
         print(f"error: cannot read jsonl: {exc}", file=sys.stderr)
         return DISPATCH_ERROR_EXIT
     run_id = jsonl_path.stem
+    report_path = jsonl_path.parent / f"{run_id}.report.md"
+    report_text = parsed["final_text"] or NO_MODEL_OUTPUT_SENTINEL
+    try:
+        write_report_file(report_path, report_text)
+    except OSError as exc:
+        print(f"error: cannot write report file: {exc}", file=sys.stderr)
+        return DISPATCH_ERROR_EXIT
     verdict = build_verdict(
         run_id=run_id,
         provider=None,
@@ -346,6 +525,7 @@ def run_reparse(jsonl_arg: str, mode: str, runner_name: str = "opencode") -> int
         jsonl_path=str(jsonl_path),
         stderr_path=None,
         step_cap=policy.STEPS_BY_MODE[mode],
+        report_path=str(report_path),
     )
     sys.stdout.write(json.dumps(verdict, ensure_ascii=False) + "\n")
     sys.stdout.flush()
@@ -355,6 +535,28 @@ def run_reparse(jsonl_arg: str, mode: str, runner_name: str = "opencode") -> int
 # ---------------------------------------------------------------------------
 # Dispatch mode
 # ---------------------------------------------------------------------------
+
+
+def start_epilogue_heartbeat() -> threading.Event:
+    """Start a daemon thread that emits a harvesting heartbeat to stderr.
+
+    Returns a ``threading.Event`` the caller sets to stop the loop. The
+    thread prints ``f"{HEARTBEAT_LINE_PREFIX} harvesting"`` to stderr every
+    ``EPILOGUE_HEARTBEAT_SECONDS`` (read at call time) until the event is set.
+    The fanout watchdog counts these lines as activity but filters them out
+    of the captured ``stderr_tail``.
+    """
+    stop = threading.Event()
+
+    def _loop() -> None:
+        while not stop.is_set():
+            sys.stderr.write(f"{HEARTBEAT_LINE_PREFIX} harvesting\n")
+            sys.stderr.flush()
+            stop.wait(EPILOGUE_HEARTBEAT_SECONDS)
+
+    thread = threading.Thread(target=_loop, daemon=True)
+    thread.start()
+    return stop
 
 
 def _validate_dispatch_args(
@@ -384,6 +586,7 @@ def _build_runner_command(
     worktree: bool,
     timeout: int,
     idle_timeout: int,
+    run_id: str | None = None,
 ) -> list[str]:
     cmd: list[str] = [
         sys.executable,
@@ -402,6 +605,8 @@ def _build_runner_command(
         cmd.extend(["--task-file", task_file])
     if session:
         cmd.extend(["--session", session])
+    if mode == "resume" and run_id:
+        cmd.extend(["--run-id", run_id])
     if worktree:
         cmd.append("--worktree")
     cmd.extend(["--timeout", str(timeout)])
@@ -416,6 +621,7 @@ def run_dispatch(args: argparse.Namespace) -> int:
     task = getattr(args, "task", None)
     task_file = getattr(args, "task_file", None)
     session = getattr(args, "session", None)
+    run_id = getattr(args, "run_id", None)
     worktree = bool(getattr(args, "worktree", False))
     timeout = getattr(args, "timeout", DEFAULT_TIMEOUT_S)
     idle_timeout = getattr(args, "idle_timeout", DEFAULT_IDLE_TIMEOUT_S)
@@ -429,10 +635,16 @@ def run_dispatch(args: argparse.Namespace) -> int:
         return DISPATCH_ERROR_EXIT
 
     _validate_dispatch_args(mode, provider, workdir, task, task_file)
+    if mode == "resume" and not run_id:
+        raise RuntimeError("--run-id is required when --mode resume is used")
+
+    workdir = str(Path(workdir).expanduser().resolve())
+    if task_file is not None:
+        task_file = str(Path(task_file).expanduser().resolve())
 
     cmd = _build_runner_command(
         provider, mode, workdir, task, task_file,
-        session, worktree, timeout, idle_timeout,
+        session, worktree, timeout, idle_timeout, run_id=run_id,
     )
 
     started: dict[str, Any] | None = None
@@ -486,58 +698,73 @@ def run_dispatch(args: argparse.Namespace) -> int:
         child_stderr.seek(0)
         child_stderr_text = child_stderr.read()
 
-    if started is None:
-        print(
-            "error: runner never emitted worker_runner.started",
-            file=sys.stderr,
+    # Epilogue: heartbeat beats from child-exit through verdict print so the
+    # fanout watchdog knows we are still harvesting (JSONL parse + report/
+    # verdict writes). Stop happens in finally on every return path.
+    heartbeat_stop = start_epilogue_heartbeat()
+    try:
+        if started is None:
+            print(
+                "error: runner never emitted worker_runner.started",
+                file=sys.stderr,
+            )
+            if child_stderr_text.strip():
+                print(child_stderr_text.rstrip(), file=sys.stderr)
+            return DISPATCH_ERROR_EXIT
+
+        log_path_str = started.get("log")
+        stderr_log_str = started.get("stderr_log")
+        run_id = started.get("run_id")
+        provider_from_started = started.get("provider")
+        runner_name = started.get("runner") or "opencode"
+        if not isinstance(log_path_str, str) or not isinstance(run_id, str):
+            print("error: started event missing log/run_id", file=sys.stderr)
+            return DISPATCH_ERROR_EXIT
+
+        log_path = Path(log_path_str)
+        if not log_path.is_file():
+            print(f"error: jsonl not found: {log_path}", file=sys.stderr)
+            return DISPATCH_ERROR_EXIT
+        runner = get_runner(runner_name)
+        try:
+            parsed = parse_jsonl(log_path, runner)
+        except OSError as exc:
+            print(f"error: cannot read jsonl: {exc}", file=sys.stderr)
+            return DISPATCH_ERROR_EXIT
+
+        step_cap = policy.STEPS_BY_MODE.get(mode, 0)
+        report_path = log_path.parent / f"{run_id}.report.md"
+        report_text = parsed["final_text"] or NO_MODEL_OUTPUT_SENTINEL
+        try:
+            write_report_file(report_path, report_text)
+        except OSError as exc:
+            print(f"error: cannot write report file: {exc}", file=sys.stderr)
+            return DISPATCH_ERROR_EXIT
+        verdict = build_verdict(
+            run_id=run_id,
+            provider=provider_from_started,
+            runner=runner_name,
+            mode=mode,
+            parsed=parsed,
+            summary=summary,
+            jsonl_path=str(log_path),
+            stderr_path=stderr_log_str,
+            step_cap=step_cap,
+            report_path=str(report_path),
         )
-        if child_stderr_text.strip():
-            print(child_stderr_text.rstrip(), file=sys.stderr)
-        return DISPATCH_ERROR_EXIT
 
-    log_path_str = started.get("log")
-    stderr_log_str = started.get("stderr_log")
-    run_id = started.get("run_id")
-    provider_from_started = started.get("provider")
-    runner_name = started.get("runner") or "opencode"
-    if not isinstance(log_path_str, str) or not isinstance(run_id, str):
-        print("error: started event missing log/run_id", file=sys.stderr)
-        return DISPATCH_ERROR_EXIT
+        verdict_path = log_path.parent / f"{run_id}.verdict.json"
+        try:
+            write_verdict_file(verdict_path, verdict)
+        except OSError as exc:
+            print(f"error: cannot write verdict file: {exc}", file=sys.stderr)
+            return DISPATCH_ERROR_EXIT
 
-    log_path = Path(log_path_str)
-    if not log_path.is_file():
-        print(f"error: jsonl not found: {log_path}", file=sys.stderr)
-        return DISPATCH_ERROR_EXIT
-    runner = get_runner(runner_name)
-    try:
-        parsed = parse_jsonl(log_path, runner)
-    except OSError as exc:
-        print(f"error: cannot read jsonl: {exc}", file=sys.stderr)
-        return DISPATCH_ERROR_EXIT
-
-    step_cap = policy.STEPS_BY_MODE.get(mode, 0)
-    verdict = build_verdict(
-        run_id=run_id,
-        provider=provider_from_started,
-        runner=runner_name,
-        mode=mode,
-        parsed=parsed,
-        summary=summary,
-        jsonl_path=str(log_path),
-        stderr_path=stderr_log_str,
-        step_cap=step_cap,
-    )
-
-    verdict_path = log_path.parent / f"{run_id}.verdict.json"
-    try:
-        write_verdict_file(verdict_path, verdict)
-    except OSError as exc:
-        print(f"error: cannot write verdict file: {exc}", file=sys.stderr)
-        return DISPATCH_ERROR_EXIT
-
-    sys.stdout.write(json.dumps(verdict, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
-    return 0
+        sys.stdout.write(json.dumps(verdict, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+        return 0
+    finally:
+        heartbeat_stop.set()
 
 
 # ---------------------------------------------------------------------------

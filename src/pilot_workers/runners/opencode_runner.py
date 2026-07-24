@@ -30,6 +30,38 @@ from pilot_workers.runners.base import (
 # everything else reads it from here.
 PINNED_OPENCODE_VERSION = "1.18.4"
 
+# D6: cache for the ``--version`` check, mapping binary path ->
+# (mtime_ns, size, version string). An entry is valid only while the file's
+# (mtime_ns, size) is unchanged; a version mismatch is never cached by
+# resolve_binary. Cleared after a successful ``install runner``.
+_VERSION_CACHE: dict[Path, tuple[int, int, str]] = {}
+
+
+def clear_version_cache() -> None:
+    """Empty the D6 ``--version`` check cache."""
+    _VERSION_CACHE.clear()
+
+
+def probe_version(binary: Path) -> str | None:
+    """Cached ``binary --version`` probe (D6), shared by ``cli.status``.
+
+    An unchanged binary (same mtime_ns + size) is served from
+    ``_VERSION_CACHE`` with no subprocess; otherwise the probe runs and a
+    non-empty result is cached. Empty/failed probes return None and are
+    not cached.
+    """
+    st = binary.stat()
+    cached = _VERSION_CACHE.get(binary)
+    if cached is not None and cached[:2] == (st.st_mtime_ns, st.st_size):
+        return cached[2]
+    proc = subprocess.run(
+        [str(binary), "--version"], text=True, capture_output=True, check=False,
+    )
+    version = (proc.stdout or proc.stderr).strip() or None
+    if version is not None:
+        _VERSION_CACHE[binary] = (st.st_mtime_ns, st.st_size, version)
+    return version
+
 # Substring in a tool error message that signals a permission-rule denial.
 _PERMISSION_DENIED_MARK = "rule which prevents"
 
@@ -75,11 +107,15 @@ class OpenCodeRunner(Runner):
             command.extend(["--session", session])
         return command
 
-    def runner_environment(self, provider: Provider, config: dict) -> dict[str, str]:
+    def runner_environment(
+        self, provider: Provider, config: dict,
+        paths: dict[str, Path] | None = None,
+    ) -> dict[str, str]:
 
         # Neutral keys (SAFE_ENV_KEYS, XDG_*, NO_COLOR,
         # CI) are added by the runtime layer, not here.
-        paths = profile_paths(provider)
+        if paths is None:
+            paths = profile_paths(provider)
         return {
             "OPENCODE_CONFIG_DIR": str(paths["config"] / "opencode"),
             "OPENCODE_CONFIG_CONTENT": json.dumps(config, separators=(",", ":")),
@@ -182,6 +218,13 @@ class OpenCodeRunner(Runner):
                 f"pinned OpenCode {PINNED_OPENCODE_VERSION} is missing; "
                 "run: pilot-workers install runner opencode"
             )
+        # D6: serve an unchanged binary from the cache when its version was
+        # already verified against the pin — no --version subprocess.
+        st = binary.stat()
+        if _VERSION_CACHE.get(binary) == (
+            st.st_mtime_ns, st.st_size, PINNED_OPENCODE_VERSION,
+        ):
+            return binary
         version = subprocess.run(
             [str(binary), "--version"], text=True, capture_output=True, check=False,
         )
@@ -189,11 +232,13 @@ class OpenCodeRunner(Runner):
             version.returncode != 0
             or version.stdout.strip() != PINNED_OPENCODE_VERSION
         ):
+            # A failed check is never cached.
             actual = (version.stdout or version.stderr).strip()
             raise RuntimeError(
                 f"expected OpenCode {PINNED_OPENCODE_VERSION}, "
                 f"got {actual or 'unknown'}"
             )
+        _VERSION_CACHE[binary] = (st.st_mtime_ns, st.st_size, PINNED_OPENCODE_VERSION)
         return binary
 
     def credential_path(self, provider: Provider) -> Path:

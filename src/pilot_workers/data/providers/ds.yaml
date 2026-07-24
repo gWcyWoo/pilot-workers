@@ -9,3 +9,6 @@ base_url: https://api.deepseek.com/v1
 display_name: DeepSeek V4 Pro Worker
 context_tokens: 1000000
 output_tokens: 384000
+strengths: cheap high-volume reading; exploration, test-run harvesting, review fan-out
+suitable_modes: explore, test, review
+notes: subscription-free API key; pair a different provider for cross-model review

@@ -1,8 +1,13 @@
-"""Offline tests for pilot_workers.cli.status.
+"""Offline tests for pilot_workers.cli.status (v0.5.0 host-level installs).
 
-All tests isolate the pilot home via PILOT_WORKERS_HOME and install with
---target pointing at tmp_path, so real ~/.claude and ~/.codex are never
-touched.
+All tests isolate the pilot home via PILOT_WORKERS_HOME, so real ~/.claude
+and ~/.codex are never touched.
+
+v3 contract (design-v0.5.0 D2): the overview keeps per-provider credential
+status, but installs are reported per HOST (present/absent + file count)
+alongside runner presence. `status <host>` is the detail form; the old
+`status <provider> on <host>` pair form is a usage error (exit 2).
+`status --json` keys installs by host only.
 """
 
 from __future__ import annotations
@@ -11,7 +16,7 @@ import json
 
 import pytest
 
-from pilot_workers.cli import install as install_mod
+from pilot_workers import providers
 from pilot_workers.cli import status as status_mod
 
 
@@ -22,6 +27,29 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("PILOT_WORKERS_HOME", str(home))
     target = tmp_path / "target"
     return {"home": home, "target": target}
+
+
+def _write_v3_manifest(installs: dict) -> None:
+    path = providers.pilot_home() / "install-manifest.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "schema_version": 3,
+        "installs": installs,
+    }), encoding="utf-8")
+
+
+def _v3_entry(files: list[str]) -> dict:
+    return {
+        "installed_at": "2026-07-24T00:00:00+00:00",
+        "package_version": "0.5.0",
+        "files": files,
+        "created_dirs": [],
+    }
+
+
+# ----------------------------------------------------------------------
+# overview: credentials per provider (unchanged)
+# ----------------------------------------------------------------------
 
 
 def test_providers_table_lists_all_providers(isolated, capsys):
@@ -47,7 +75,6 @@ def test_json_shape(isolated, capsys):
     glm = data["providers"]["glm"]
     assert glm["credential"]["configured"] is False
     assert str(isolated["home"].resolve()) in glm["credential"]["path"]
-    assert glm["hosts"] == {"claude": "-", "codex": "-"}
 
     opencode = data["runners"]["opencode"]
     assert opencode["present"] is False
@@ -55,69 +82,87 @@ def test_json_shape(isolated, capsys):
     assert opencode["pinned"]
     assert str(isolated["home"].resolve()) in opencode["binary"]
 
+    # Installs are reported host-level.
+    assert "installs" in data
+    for host in data["installs"]:
+        assert host in ("claude", "codex")
 
-def test_json_reflects_install(isolated, capsys):
-    target = str(isolated["target"])
-    assert install_mod.main(["glm", "on", "claude", "--target", target]) == 0
-    capsys.readouterr()
+
+# ----------------------------------------------------------------------
+# overview: installs per host
+# ----------------------------------------------------------------------
+
+
+def test_overview_lists_host_installs(isolated, capsys):
+    _write_v3_manifest({"claude": _v3_entry([
+        "/tmp/x/skills/pilot-workers/SKILL.md",
+        "/tmp/x/skills/pilot-workers/references/dispatch.md",
+    ])})
+
+    assert status_mod.main([]) == 0
+    out = capsys.readouterr().out
+    assert "Installs" in out
+    # Host row shows presence plus file count.
+    claude_lines = [
+        line for line in out.splitlines() if "claude" in line.lower()]
+    assert claude_lines
+    assert any("2" in line for line in claude_lines)
+
+
+def test_json_installs_keyed_by_host_only(isolated, capsys):
+    _write_v3_manifest({"claude": _v3_entry([
+        "/tmp/x/skills/pilot-workers/SKILL.md",
+        "/tmp/x/skills/pilot-workers/references/dispatch.md",
+    ])})
 
     assert status_mod.main(["--json"]) == 0
     data = json.loads(capsys.readouterr().out)
-    assert data["providers"]["glm"]["hosts"]["claude"] == "installed"
-    assert data["providers"]["glm"]["hosts"]["codex"] == "-"
-    assert data["providers"]["ds"]["hosts"]["claude"] == "-"
+    assert "claude" in data["installs"]
+    for host, info in data["installs"].items():
+        assert host in ("claude", "codex")
+        # No provider nesting under a host entry.
+        for key in ("glm", "kimi-k3", "ds", "__all__"):
+            assert key not in info
 
 
-def test_pair_status_not_installed(isolated, capsys):
-    assert status_mod.main(["glm", "on", "claude"]) == 0
-    assert "not installed" in capsys.readouterr().out
+# ----------------------------------------------------------------------
+# detail form: status <host>
+# ----------------------------------------------------------------------
 
 
-def test_pair_status_installed_lists_files(isolated, capsys):
-    target = str(isolated["target"])
-    assert install_mod.main(["glm", "on", "claude", "--target", target]) == 0
-    capsys.readouterr()
+def test_status_host_detail_installed(isolated, capsys):
+    _write_v3_manifest({"claude": _v3_entry([
+        "/tmp/x/skills/pilot-workers/SKILL.md",
+        "/tmp/x/skills/pilot-workers/references/dispatch.md",
+    ])})
 
-    assert status_mod.main(["glm", "on", "claude"]) == 0
+    assert status_mod.main(["claude"]) == 0
     out = capsys.readouterr().out
-    assert "glm on claude: installed" in out
-    assert "glm-coder.md" in out
+    assert "claude" in out
+    assert "installed" in out.lower()
 
 
-def test_pair_status_json(isolated, capsys):
-    target = str(isolated["target"])
-    assert install_mod.main(["glm", "on", "claude", "--target", target]) == 0
-    capsys.readouterr()
-
-    assert status_mod.main(["glm", "on", "claude", "--json"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["provider"] == "glm"
-    assert payload["host"] == "claude"
-    assert payload["installed"] is True
-    assert payload["legacy"] is False
-    assert len(payload["entry"]["files"]) == 8
+def test_status_host_detail_not_installed(isolated, capsys):
+    assert status_mod.main(["codex"]) == 0
+    out = capsys.readouterr().out
+    assert "not installed" in out.lower()
 
 
-def test_pair_status_unknown_provider_returns_2(isolated, capsys):
-    assert status_mod.main(["bogus", "on", "claude"]) == 2
-    assert "unknown provider" in capsys.readouterr().err
+def test_status_unknown_host_returns_2(isolated, capsys):
+    assert status_mod.main(["bogus"]) == 2
+    assert "usage:" in capsys.readouterr().err
+
+
+# ----------------------------------------------------------------------
+# removed pair form
+# ----------------------------------------------------------------------
+
+
+def test_status_provider_on_host_pair_is_usage_error(isolated, capsys):
+    assert status_mod.main(["glm", "on", "claude"]) == 2
+    assert "usage:" in capsys.readouterr().err
 
 
 def test_status_bad_grammar_returns_2(isolated, capsys):
     assert status_mod.main(["glm", "claude"]) == 2
     assert "usage:" in capsys.readouterr().err
-
-
-def test_status_reports_legacy_v1_install(isolated, capsys):
-    from pilot_workers import providers
-    target = str(isolated["target"])
-    manifest_path = providers.pilot_home() / "install-manifest.json"
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    v1 = {"schema_version": 1, "hosts": {"claude": {
-        "installed_at": "2026-01-01", "package_version": "0.2.0",
-        "files": [f"{target}/agents/glm-coder.md"], "created_dirs": []}}}
-    manifest_path.write_text(json.dumps(v1))
-    rc = status_mod.main([])
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "legacy" in out.lower()

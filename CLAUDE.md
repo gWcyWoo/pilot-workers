@@ -31,6 +31,9 @@ python3 -m pilot_workers.credentials all --status
 # Clean old logs (always keeps newest run)
 python3 -m pilot_workers.maintain logs --older-than-days 7
 
+# Reap old run sandboxes + their logs (keeps newest N per provider; symlink-safe)
+python3 -m pilot_workers.maintain runs --older-than-days 30 --keep 3
+
 # List/remove detached worktrees
 python3 -m pilot_workers.maintain worktrees list
 python3 -m pilot_workers.maintain worktrees remove /path/to/worktree
@@ -43,19 +46,20 @@ pilot-workers dispatch --provider glm --mode code --workdir /path/to/project --t
 # Dispatch several jobs concurrently (stdout = one JSON array of verdicts)
 pilot-workers fanout --workdir /path/to/project --job glm:review:/tmp/r1.md --job kimi-k3:review:/tmp/r2.md
 
-# Install host integrations per provider (agents, commands, skills)
-# Overwrites same-named files; reinstall purges files from the previous install (tracked in
-# $PILOT_WORKERS_HOME/install-manifest.json, schema v2 — uninstall uses the same manifest).
-pilot-workers install glm on claude    # one provider on one host
-pilot-workers install all on codex     # every provider on one host
-pilot-workers install all on all       # full matrix
-pilot-workers uninstall glm on claude  # precise removal per manifest
+# Install the host playbook skill (ONE pilot-workers skill per host; engine-neutral).
+# Reinstall purges files from the previous install (tracked in
+# $PILOT_WORKERS_HOME/install-manifest.json, schema v3 — uninstall uses the same manifest;
+# first v3 install auto-migrates v1/v2 manifests, printing one line per purged legacy file).
+pilot-workers install claude           # one host
+pilot-workers install all              # both hosts (claude + codex)
+pilot-workers uninstall claude         # precise removal per manifest
 pilot-workers install runner opencode  # install the pinned worker runtime
 pilot-workers uninstall runner opencode
 
-# Status overview: provider credentials, per-host install state, runner presence/version
+# Status overview: provider credentials (incl. strengths/suitable_modes/notes), host install
+# state, runner presence/version
 pilot-workers status
-pilot-workers status glm on claude
+pilot-workers status claude            # per-host detail
 pilot-workers status --json
 ```
 
@@ -65,11 +69,11 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/pytest
 ```
 
-Tests live in `tests/` (130 tests, all offline — no network, no real `~/.claude`/`~/.codex` access).
+Tests live in `tests/` (289 tests, all offline — no network, no real `~/.claude`/`~/.codex` access).
 
 ## Architecture
 
-**Data flow**: Provider YAML (with `runner` field) → `providers.py` loads at import → `runners/` registry resolves the runner adapter → adapter builds engine config → `runtime.py` spawns isolated subprocess with sanitized env → adapter translates raw engine events to `UnifiedEvent`s → `fmt_events.py` renders them to `latest.log`; `cli/dispatch.py` aggregates them into a verdict.
+**Data flow**: Provider YAML (with `runner` field) → `providers.py` loads at import → `runners/` registry resolves the runner adapter → adapter builds engine config → `runtime.py` spawns an isolated subprocess inside a per-run sandbox (`providers/<key>/runs/<run_id>/`, sanitized env) → adapter translates raw engine events to `UnifiedEvent`s → `fmt_events.py` renders them to `latest.log`; `cli/dispatch.py` aggregates them into a structured verdict (schema v2: `parse_state` + per-mode `result` + `final_text_path`; sibling flags `timed_out`/`idle_timed_out`/`interrupted` checked even on `completed`).
 
 **Runner adapter layer** (`runners/`): engines are pluggable. `base.py` defines `UnifiedEvent` (kind: step/text/reasoning/tool/error/session) and the `Runner` ABC (config/command/env/task-input/event-translation/binary/credential seams). `opencode_runner.py` is the OpenCode implementation and owns everything OpenCode-specific: config schema, `OPENCODE_*` env vars, CLI flags, event format, permission-denied detection, auth.json format, `PINNED_OPENCODE_VERSION`, and the npm binary path. `RUNNERS` registry + `get_runner(name)` in `__init__.py`. Contract notes (see base.py docstring): self events (`worker_runner.*`) bypass adapters; disk JSONL always stores raw engine events (adapters translate on read); a `runner` field in started/verdict events makes logs self-describing; `--runner` on reparse selects the adapter for historical logs.
 
@@ -77,27 +81,27 @@ Tests live in `tests/` (130 tests, all offline — no network, no real `~/.claud
 
 - `providers.py` — Loads all `data/providers/*.yaml` at import time into `PROVIDERS` dict (runner-neutral fields incl. optional `runner:`, default `opencode`). Path helpers (`pilot_home()`, `profile_paths()`) and `MAX_TASK_BYTES`.
 - `policy.py` — Mode→agent mapping (`MODE_TO_AGENT`), `STEPS_BY_MODE`, shell permission matrices, prompt assembly from `prompts/*.md`, permission profile loading from `data/permissions/`, and `build_config()`. The encoding is OpenCode-specific (last-match-wins semantics; deny rules must come after allow rules they override) and is invoked only via `OpenCodeRunner.build_config`; a future runner encodes the same mode intent its own way.
-- `runtime.py` — Runner-neutral isolation layer: `SAFE_ENV_KEYS` whitelist, XDG directory isolation per provider (runner env merged on top), credential file IO with 0600 enforcement (path/format from the runner), detached worktree creation, subprocess I/O with heartbeat/timeout/idle-timeout, and `[REDACTED]` replacement for leaked secrets.
+- `runtime.py` — Runner-neutral isolation layer: `SAFE_ENV_KEYS` whitelist, XDG directory isolation per provider (runner env merged on top), per-run sandbox provisioning (private 0700 `config/data/state`, shared per-provider cache symlink, zero-copy `auth.json` symlink, `O_CREAT|O_EXCL` `.lock` with start-time staleness check), credential file IO with 0600 enforcement (path/format from the runner), detached worktree creation, subprocess I/O with heartbeat/timeout/idle-timeout, and `[REDACTED]` replacement for leaked secrets.
 - `cli/run.py` — Thin CLI entry point; resolves the provider's runner and delegates. Console script entry: `pilot-workers`.
-- `cli/dispatch.py` — Deterministic outer shell (two-line stdout contract: started + verdict); verdict computed from UnifiedEvents.
-- `cli/install.py` — Deploys host integration files (agents, commands, skills) to user config directories, records an install manifest for clean uninstall.
+- `cli/dispatch.py` — Deterministic outer shell (two-line stdout contract: started + structured verdict, schema v2). Extracts the per-mode result block from the worker's final text (no LLM), writes `report.md` + `verdict.json` atomically (0600); `--reparse` recomputes a verdict from an existing JSONL and also writes `report.md`.
+- `cli/install.py` — Deploys the host playbook skill (`integrations/<host>-host/skills/pilot-workers/`) to the host's skill directory; manifest v3 is host-level (auto-migrates v1/v2 on first install, purging legacy per-provider files with one printed line each).
 - `fmt_events.py` — Renders UnifiedEvents and self events into `latest.log` for `tail -f`. Monitor conventions: `== DONE` on success, `!! ` prefix on errors.
 - `credentials.py` — Interactive credential setup (path/payload from the provider's runner) with atomic write (tempfile + fsync + rename → 0600).
-- `maintain.py` — Log cleanup and worktree lifecycle. Refuses to delete dirty or unintegrated worktrees.
+- `maintain.py` — Log cleanup, run-sandbox reaper (`maintain runs --older-than-days N [--keep M]`; symlink-safe — lstat-walks and unlinks every symlink rather than following it), and worktree lifecycle. Refuses to delete dirty or unintegrated worktrees.
 
 **Package data** (shipped with `pip install pilot-workers`):
 
 - `data/providers/*.yaml` — Provider definitions (GLM, Kimi, DeepSeek).
 - `data/permissions/*.yaml` — Permission profiles (relaxed, strict).
 - `prompts/*.md` — Worker system prompts injected by the runner.
-- `integrations/` — Host integration configs (claude-host agents/commands, codex-host skills).
+- `integrations/` — Host playbook skills (ONE `pilot-workers/` skill per host: `claude-host`, `codex-host`).
 - `scripts/install_runtime.sh` — OpenCode runtime installer.
 
 **Modes and permissions**: Five modes (`code`, `explore`, `test`, `review`, `resume`). Each mode has built-in default permissions: `code` allows shell `*` with network/destructive denies; `explore` and `review` are read-only (shell default deny, explicit allow list for grep/find/git-read commands, `*>*` deny last to block redirects); `test` extends read-only with test runner commands; `resume` reuses `code` permissions with a required `--session`. Defaults can be overridden via **permission profiles** (see below).
 
-**Provider isolation**: Each provider gets its own XDG tree under `$PILOT_WORKERS_HOME/opencode-workers/providers/<key>/` (config, data, state, cache). Credentials stored in `data/opencode/auth.json`. The subprocess inherits only `SAFE_ENV_KEYS` from the parent environment — no API keys leak across providers.
+**Provider isolation**: Each provider gets its own XDG tree under `$PILOT_WORKERS_HOME/opencode-workers/providers/<key>/` (config, data, state, cache). The canonical credential lives at `data/opencode/auth.json`; each dispatch provisions a per-run sandbox at `providers/<key>/runs/<run_id>/` with private `config/data/state` (0700), a symlink to the shared per-provider cache, and a zero-copy symlink to the canonical `auth.json`. An `O_CREAT|O_EXCL` `.lock` (`{pid, started_at}`) guards the sandbox; resume (`--session` + `--run-id`) reuses the original sandbox and acquires the lock only when absent or stale (the resume window equals the sandbox retention window). The subprocess inherits only `SAFE_ENV_KEYS` from the parent environment — no API keys leak across providers.
 
-**Host integrations** (`integrations/`): Config-only directories (no Python code) for planner-side integration. `claude-host/` has 12 agents (glm/kimi/ds × coder/explorer/reviewer/tester) + 8 slash commands. `codex-host/` has skill entry points. Any host that can write a task file and call the CLI can integrate. Run `pilot-workers install all on claude` or `pilot-workers install all on codex` to deploy.
+**Host integrations** (`integrations/`): Each host ships ONE `pilot-workers` playbook skill under `integrations/<host>-host/skills/pilot-workers/` (a doctrine playbook, not provider-specific syntax; the v0.4.0 12-agents + 8-commands matrix is gone). Any host that can write a task file and call the CLI can integrate. Run `pilot-workers install claude`, `pilot-workers install codex`, or `pilot-workers install all` to deploy.
 
 ## Permission profiles
 
@@ -140,7 +144,4 @@ Drop a YAML file in `data/providers/` with all 7 required fields (`key`, `provid
 - The `OPENCODE_CONFIG_CONTENT` env var carries the full config as JSON to the subprocess; this is the highest-precedence config path in OpenCode.
 - Task text is delivered via stdin to OpenCode (`--pure run`), never in argv.
 - `$PILOT_WORKERS_HOME` env var overrides the default root (`$CODEX_HOME` → `~/.codex`).
-
-## Known issues
-
-- `docs/architecture.md` directory tree references the old `~/.codex/skills/dispatch-opencode-workers/` layout, not the current `src/pilot_workers/` structure.
+- Worker prompts (`prompts/*.md`) instruct the model to end its report with a literal `<!--PILOT_RESULT_BEGIN-->...<!--PILOT_RESULT_END-->` block; `cli/dispatch.py` extracts the LAST such block deterministically (no LLM) into `verdict.result`, validated against the per-mode schema.
