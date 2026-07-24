@@ -12,6 +12,7 @@ USAGE = """usage: pilot-workers <subcommand> [args]
 subcommands:
   run          Dispatch a bounded task to an isolated LLM worker.
   dispatch     Deterministic outer shell around run (started + verdict JSON).
+  fanout       Dispatch several jobs concurrently; stdout = one JSON array of verdicts.
   template     Print the task template for a mode (code|explore|test|review).
   install      install <provider|all> on <host|all> | install runner <name>.
   uninstall    uninstall <provider|all> on <host|all> | uninstall runner <name>.
@@ -54,6 +55,11 @@ def main(argv: list[str] | None = None) -> int:
         from pilot_workers.cli.dispatch import main as dispatch_main
 
         return dispatch_main(rest)
+
+    if subcommand == "fanout":
+        from pilot_workers.cli.fanout import main as fanout_main
+
+        return fanout_main(rest)
 
     if subcommand == "template":
         import pilot_workers

@@ -40,6 +40,9 @@ pilot-workers template code > /tmp/task.md
 pilot-workers dispatch --provider glm --mode code --workdir /path/to/project --task-file /tmp/task.md
 # dispatch stdout = exactly two JSON lines: worker_runner.started + worker_runner.verdict
 
+# Dispatch several jobs concurrently (stdout = one JSON array of verdicts)
+pilot-workers fanout --workdir /path/to/project --job glm:review:/tmp/r1.md --job kimi-k3:review:/tmp/r2.md
+
 # Install host integrations per provider (agents, commands, skills)
 # Overwrites same-named files; reinstall purges files from the previous install (tracked in
 # $PILOT_WORKERS_HOME/install-manifest.json, schema v2 — uninstall uses the same manifest).

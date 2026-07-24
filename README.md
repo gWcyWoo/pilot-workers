@@ -54,6 +54,7 @@ pilot-workers <subcommand> [args]
 
   run              Dispatch a task (streaming output).
   dispatch         Deterministic wrapper around run (two-line JSON: started + verdict).
+  fanout           Dispatch several jobs concurrently; stdout = one JSON array of verdicts.
   template         Print the task template for a mode (code|explore|test|review).
   install          Install integrations or runner.
                      install <provider|all> on <host|all>
