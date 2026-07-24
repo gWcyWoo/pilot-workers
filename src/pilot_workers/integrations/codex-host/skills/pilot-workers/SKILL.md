@@ -1,6 +1,6 @@
 ---
 name: pilot-workers
-description: Plan with Codex, then run bounded tasks (code, explore, test, review, resume) through isolated LLM workers via the pilot-workers CLI and verify their structured verdicts. Invoke explicitly as `$pilot-workers [code|explore|test|review|resume] [task]`. Use whenever the user asks to delegate coding, investigation, testing, review, or session continuation to a worker model (glm, kimi-k3, ds). Not for small tweaks, mid-course judgment calls, or credentials/CI/production changes.
+description: Plan with Codex, then run bounded tasks (code, explore, test, review, resume) through isolated LLM workers via the pilot-workers CLI and verify their structured verdicts. Invoke explicitly as `$pilot-workers [code|explore|test|review|resume] [task]`. Use whenever the user asks to delegate coding, investigation, testing, review, or session continuation to a worker model — glm, kimi/kimi-k3/k3, deepseek/ds. Not for small tweaks, mid-course judgment calls, or credentials/CI/production changes.
 ---
 
 # pilot-workers Playbook
