@@ -15,13 +15,14 @@ import argparse
 import json
 from pathlib import Path
 import subprocess
+import sys
 import time
 
 from pilot_workers import providers
 
 
 def _run_pairs(logs_dir: Path) -> list[list[Path]]:
-    """Group per-run files (jsonl + stderr + rendered archive) by run id, newest first."""
+    """Group per-run files (jsonl + stderr + rendered archive + verdict) by run id, newest first."""
     groups: dict[str, list[Path]] = {}
     for path in logs_dir.iterdir():
         if not path.is_file():
@@ -36,6 +37,8 @@ def _run_pairs(logs_dir: Path) -> list[list[Path]]:
             run_id = name[: -len(".jsonl")]
         elif name.startswith("rendered-") and name.endswith(".log"):
             run_id = name[len("rendered-") : -len(".log")]
+        elif name.endswith(".verdict.json"):
+            run_id = name[: -len(".verdict.json")]
         if run_id is None:
             continue
         groups.setdefault(run_id, []).append(path)
@@ -162,7 +165,7 @@ def main() -> int:
             return list_worktrees()
         return remove_worktree(args.path)
     except (OSError, RuntimeError) as exc:
-        print(f"error: {exc}")
+        print(f"error: {exc}", file=sys.stderr)
         return 1
 
 

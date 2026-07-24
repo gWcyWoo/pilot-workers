@@ -1,7 +1,7 @@
 """Tests for fmt_events.render_unified — verifies rendering equivalence."""
 
 from pilot_workers.fmt_events import render_unified
-from pilot_workers.runners.base import UnifiedEvent, ToolCall, TokenUsage
+from pilot_workers.runners.base import UnifiedEvent, ToolCall
 
 
 def _rendered(ev):
@@ -44,3 +44,29 @@ def test_reasoning_rendering():
     ev = UnifiedEvent(kind="reasoning", text="Let me think\nabout this")
     line = _rendered(ev)
     assert "Thinking" in line or "think" in line
+
+
+def test_render_event_started():
+    from pilot_workers.fmt_events import render_event
+    lines = render_event({"type": "worker_runner.started", "provider": "glm",
+        "model": "glm-worker/glm-5.2", "mode": "code", "run_id": "r1",
+        "workdir": "/tmp", "log": "/tmp/r1.jsonl"})
+    joined = "\n".join(lines) if isinstance(lines, list) else str(lines)
+    assert "glm" in joined
+
+
+def test_render_event_summary_done():
+    from pilot_workers.fmt_events import render_event
+    lines = render_event({"type": "worker_runner.summary", "exit_code": 0,
+        "session_id": "ses_x", "timed_out": False, "idle_timed_out": False,
+        "interrupted": False})
+    joined = "\n".join(lines) if isinstance(lines, list) else str(lines)
+    assert "DONE" in joined
+
+
+def test_render_event_summary_failed():
+    from pilot_workers.fmt_events import render_event
+    lines = render_event({"type": "worker_runner.summary", "exit_code": 1,
+        "timed_out": True, "idle_timed_out": False, "interrupted": False})
+    joined = "\n".join(lines) if isinstance(lines, list) else str(lines)
+    assert "FAILED" in joined or "timed_out" in joined

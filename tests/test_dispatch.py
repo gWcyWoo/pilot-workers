@@ -178,3 +178,15 @@ def test_main_reparse_full_pipeline(tmp_path, capsys):
     verdict = json.loads(out.strip().splitlines()[-1])
     assert verdict["type"] == "worker_runner.verdict"
     assert verdict["verdict"] == "completed"
+
+
+def test_classify_verdict_text_exactly_200_is_completed():
+    text_200 = "x" * 200
+    parsed = _sample_parsed(final_text=text_200, steps=3)
+    assert dispatch_mod.classify_verdict(parsed, 10, {"exit_code": 0}) == "completed"
+
+
+def test_classify_verdict_text_199_is_empty():
+    text_199 = "x" * 199
+    parsed = _sample_parsed(final_text=text_199, steps=3)
+    assert dispatch_mod.classify_verdict(parsed, 10, {"exit_code": 0}) == "empty"

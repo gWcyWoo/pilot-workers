@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from pilot_workers.cli import main as main_mod
 
 
@@ -72,10 +70,28 @@ def test_run_dry_run_emits_json(tmp_path, monkeypatch, capsys):
     assert payload["type"] == "worker_runner.dry_run"
 
 
-def test_install_help_raises_system_exit_0():
-    with pytest.raises(SystemExit) as excinfo:
-        main_mod.main(["install", "--help"])
-    assert excinfo.value.code == 0
+def test_install_help_prints_new_grammar(capsys):
+    assert main_mod.main(["install", "--help"]) == 0
+    out = capsys.readouterr().out
+    assert "usage: pilot-workers install" in out
+    assert "on <host|all>" in out
+    assert "runner <name>" in out
+
+
+def test_usage_mentions_new_grammar(capsys):
+    assert main_mod.main([]) == 0
+    out = capsys.readouterr().out
+    assert "install <provider|all> on <host|all>" in out
+    assert "status" in out
+
+
+def test_status_route_prints_table_headers(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("PILOT_WORKERS_HOME", str(tmp_path / "home"))
+    rc = main_mod.main(["status"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "PROVIDER" in out
+    assert "RUNNER" in out
 
 
 def test_uninstall_routes_and_fails_without_manifest(tmp_path, monkeypatch, capsys):

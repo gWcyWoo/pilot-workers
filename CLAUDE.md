@@ -10,7 +10,7 @@ pilot-workers dispatches bounded tasks to isolated LLM workers (GLM, Kimi, etc.)
 
 ```bash
 # Install the pinned OpenCode runtime (one-time)
-bash "$(python3 -c "from pathlib import Path; import pilot_workers; print(Path(pilot_workers.__file__).parent / 'scripts' / 'install_runtime.sh')")"
+pilot-workers install runner opencode
 
 # Configure credentials (interactive, key never displayed)
 python3 -m pilot_workers.credentials glm
@@ -40,13 +40,20 @@ pilot-workers template code > /tmp/task.md
 pilot-workers dispatch --provider glm --mode code --workdir /path/to/project --task-file /tmp/task.md
 # dispatch stdout = exactly two JSON lines: worker_runner.started + worker_runner.verdict
 
-# Install host integrations (agents, commands, skills)
+# Install host integrations per provider (agents, commands, skills)
 # Overwrites same-named files; reinstall purges files from the previous install (tracked in
-# $PILOT_WORKERS_HOME/install-manifest.json — uninstall uses the same manifest).
-pilot-workers install claude   # → ~/.claude/agents/ + ~/.claude/commands/
-pilot-workers install codex    # → $CODEX_HOME/skills/
-pilot-workers install all      # both
-pilot-workers uninstall claude # precise removal per manifest
+# $PILOT_WORKERS_HOME/install-manifest.json, schema v2 — uninstall uses the same manifest).
+pilot-workers install glm on claude    # one provider on one host
+pilot-workers install all on codex     # every provider on one host
+pilot-workers install all on all       # full matrix
+pilot-workers uninstall glm on claude  # precise removal per manifest
+pilot-workers install runner opencode  # install the pinned worker runtime
+pilot-workers uninstall runner opencode
+
+# Status overview: provider credentials, per-host install state, runner presence/version
+pilot-workers status
+pilot-workers status glm on claude
+pilot-workers status --json
 ```
 
 ```bash
@@ -55,7 +62,7 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/pytest
 ```
 
-Tests live in `tests/` (100 tests, all offline — no network, no real `~/.claude`/`~/.codex` access).
+Tests live in `tests/` (130 tests, all offline — no network, no real `~/.claude`/`~/.codex` access).
 
 ## Architecture
 
@@ -87,7 +94,7 @@ Tests live in `tests/` (100 tests, all offline — no network, no real `~/.claud
 
 **Provider isolation**: Each provider gets its own XDG tree under `$PILOT_WORKERS_HOME/opencode-workers/providers/<key>/` (config, data, state, cache). Credentials stored in `data/opencode/auth.json`. The subprocess inherits only `SAFE_ENV_KEYS` from the parent environment — no API keys leak across providers.
 
-**Host integrations** (`integrations/`): Config-only directories (no Python code) for planner-side integration. `claude-host/` has 12 agents (glm/kimi/ds × coder/explorer/reviewer/tester) + 8 slash commands. `codex-host/` has skill entry points. Any host that can write a task file and call the CLI can integrate. Run `pilot-workers install claude` or `pilot-workers install codex` to deploy.
+**Host integrations** (`integrations/`): Config-only directories (no Python code) for planner-side integration. `claude-host/` has 12 agents (glm/kimi/ds × coder/explorer/reviewer/tester) + 8 slash commands. `codex-host/` has skill entry points. Any host that can write a task file and call the CLI can integrate. Run `pilot-workers install all on claude` or `pilot-workers install all on codex` to deploy.
 
 ## Permission profiles
 

@@ -24,5 +24,5 @@ def get_runner(name: str) -> Runner:
         return RUNNERS[name]
     except KeyError:
         raise RuntimeError(
-            f"unknown runner: {name} (available: {sorted(RUNNERS)})"
+            f"unknown runner: {name} (available: {', '.join(sorted(RUNNERS))})"
         )

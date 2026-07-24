@@ -78,6 +78,22 @@ def test_load_providers_duplicate_key_raises(tmp_path):
         load_providers(tmp_path)
 
 
+def test_load_providers_reserved_key_raises(tmp_path):
+    text = VALID_PROVIDER_YAML.replace("key: testp", "key: runner")
+    (tmp_path / "bad.yaml").write_text(text, encoding="utf-8")
+    with pytest.raises(RuntimeError, match="reserved"):
+        load_providers(tmp_path)
+
+
+def test_asset_prefix_defaults_to_key(tmp_path):
+    (tmp_path / "testp.yaml").write_text(VALID_PROVIDER_YAML, encoding="utf-8")
+    assert load_providers(tmp_path)["testp"].asset_prefix == "testp"
+
+
+def test_kimi_k3_asset_prefix_is_kimi():
+    assert PROVIDERS["kimi-k3"].asset_prefix == "kimi"
+
+
 def test_load_providers_empty_directory_raises(tmp_path):
     with pytest.raises(RuntimeError, match="no provider"):
         load_providers(tmp_path)

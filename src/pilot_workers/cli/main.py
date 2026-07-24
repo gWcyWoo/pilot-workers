@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import subprocess
 import sys
 
 
@@ -14,11 +13,15 @@ subcommands:
   run          Dispatch a bounded task to an isolated LLM worker.
   dispatch     Deterministic outer shell around run (started + verdict JSON).
   template     Print the task template for a mode (code|explore|test|review).
-  install      Install worker integration assets.
-  uninstall    Remove worker integration assets.
+  install      install <provider|all> on <host|all> | install runner <name>.
+  uninstall    uninstall <provider|all> on <host|all> | uninstall runner <name>.
+  status       Show provider credential/install and runner status [--json].
   credentials  Configure isolated worker credentials.
   maintain     Worker log and worktree lifecycle tools.
-  runtime      Manage the worker runtime (runtime install).
+  runtime      Deprecated alias for 'install runner opencode'.
+
+Deprecated: 'install <host>' / 'uninstall <host>' still work as aliases for
+'<provider|all> on <host>' with provider=all.
 
 Use 'pilot-workers <subcommand> --help' for subcommand-specific help.
 """
@@ -83,6 +86,11 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return fn(rest)
 
+    if subcommand == "status":
+        from pilot_workers.cli.status import main as status_main
+
+        return status_main(rest)
+
     if subcommand == "credentials":
         from pilot_workers.credentials import main as credentials_main
 
@@ -97,14 +105,14 @@ def main(argv: list[str] | None = None) -> int:
         if rest != ["install"]:
             print("usage: pilot-workers runtime install", file=sys.stderr)
             return 2
-        import pilot_workers
-
-        script = (
-            Path(pilot_workers.__file__).resolve().parent
-            / "scripts"
-            / "install_runtime.sh"
+        print(
+            "note: 'runtime install' is deprecated; "
+            "use 'pilot-workers install runner opencode'",
+            file=sys.stderr,
         )
-        return subprocess.run(["bash", str(script)]).returncode
+        from pilot_workers.cli.install import main as install_main
+
+        return install_main(["runner", "opencode"])
 
     print(f"error: unknown subcommand: {subcommand}", file=sys.stderr)
     print(USAGE, end="", file=sys.stderr)

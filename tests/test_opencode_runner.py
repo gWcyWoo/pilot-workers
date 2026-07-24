@@ -1,7 +1,7 @@
 """Tests for OpenCodeRunner.parse_events and related methods."""
 
 import pytest
-from pilot_workers.runners import get_runner, UnifiedEvent
+from pilot_workers.runners import get_runner
 from pilot_workers.runners.opencode_runner import OpenCodeRunner
 
 

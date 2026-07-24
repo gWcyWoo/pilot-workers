@@ -7,6 +7,7 @@ import argparse
 import getpass
 import json
 import os
+from pathlib import Path
 import tempfile
 
 from pilot_workers.providers import PROVIDERS, workers_root
@@ -14,36 +15,21 @@ from pilot_workers.runners import get_runner
 
 
 def credential_status(provider_key: str) -> dict[str, object]:
+    from pilot_workers import runtime
     provider = PROVIDERS[provider_key]
     runner = get_runner(provider.runner)
-    path = runner.credential_path(provider)
-    configured = False
-    secure_mode = False
-    error: str | None = None
-    if path.is_file():
-        secure_mode = (path.stat().st_mode & 0o077) == 0
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            try:
-                key = runner.parse_credential(provider, payload)
-            except (RuntimeError, TypeError, AttributeError) as exc:
-                error = str(exc)
-                key = ""
-            configured = bool(key and key.strip())
-        except (OSError, json.JSONDecodeError) as exc:
-            error = str(exc)
+    meta = runtime.credential_metadata(provider, runner)
     return {
         "provider": provider_key,
         "runner": provider.runner,
         "provider_id": provider.provider_id,
-        "configured": configured,
-        "secure_mode": secure_mode,
-        "path": str(path),
-        "error": error,
+        "configured": meta["configured"],
+        "secure_mode": meta["secure_mode"],
+        "path": meta["path"],
     }
 
 
-def ensure_private_directories(destination) -> None:
+def ensure_private_directories(destination: Path) -> None:
     current = workers_root()
     target = destination.parent
     while True:

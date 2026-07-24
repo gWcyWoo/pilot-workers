@@ -78,7 +78,7 @@ class Runner(ABC):
     name: str
 
     @abstractmethod
-    def build_config(self, provider: Any, mode: str, permission_profile: str | None = None) -> dict: ...
+    def build_config(self, provider: Any, mode: str, permission_profile: str | None = None) -> dict[str, Any]: ...
 
     @abstractmethod
     def build_command(self, binary: Path, provider: Any, mode: str,
@@ -108,7 +108,7 @@ class Runner(ABC):
     def credential_path(self, provider: Any) -> Path: ...
 
     @abstractmethod
-    def credential_payload(self, provider: Any, key: str) -> dict:
+    def credential_payload(self, provider: Any, key: str) -> dict[str, Any]:
         """Produce the credential-file payload structure; the actual file
         write (atomic write / 0600 mode) is owned by the neutral layer."""
 

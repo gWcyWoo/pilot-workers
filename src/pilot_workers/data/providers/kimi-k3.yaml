@@ -3,6 +3,7 @@
 # Docs: https://www.kimi.com/code/docs/en/third-party-tools/other-coding-agents
 
 key: kimi-k3
+asset_prefix: kimi
 provider_id: kimi-worker
 model_id: k3
 base_url: https://api.kimi.com/coding/v1

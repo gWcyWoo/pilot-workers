@@ -3,14 +3,13 @@ set -euo pipefail
 
 # The pinned version has a single source of truth:
 # src/pilot_workers/runners/opencode_runner.py (PINNED_OPENCODE_VERSION).
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OPENCODE_VERSION="$(python3 -c "from pilot_workers.runners.opencode_runner import PINNED_OPENCODE_VERSION as v; print(v)")"
 if [[ -z "${OPENCODE_VERSION}" ]]; then
   echo "error: could not read PINNED_OPENCODE_VERSION from runners/opencode_runner.py" >&2
   exit 1
 fi
 
-readonly CODEX_ROOT="${CODEX_HOME:-${HOME}/.codex}"
+readonly CODEX_ROOT="${PILOT_WORKERS_HOME:-${CODEX_HOME:-${HOME}/.codex}}"
 readonly INSTALL_ROOT="${CODEX_ROOT}/worker-runtime/opencode/${OPENCODE_VERSION}"
 readonly OPENCODE_BIN="${INSTALL_ROOT}/node_modules/.bin/opencode"
 

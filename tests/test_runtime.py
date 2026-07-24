@@ -6,7 +6,6 @@ from pilot_workers.runners import get_runner
 
 def test_runner_env_cannot_override_safe_env_keys(monkeypatch, tmp_path):
     monkeypatch.setenv("PILOT_WORKERS_HOME", str(tmp_path))
-    r = get_runner("opencode")
     p = providers.PROVIDERS["glm"]
     poisoned = {"PATH": "/evil", "HOME": "/evil", "OPENCODE_CUSTOM": "ok"}
     env = runtime.build_environment(p, poisoned)
@@ -17,7 +16,6 @@ def test_runner_env_cannot_override_safe_env_keys(monkeypatch, tmp_path):
 
 def test_runner_env_cannot_override_xdg_keys(monkeypatch, tmp_path):
     monkeypatch.setenv("PILOT_WORKERS_HOME", str(tmp_path))
-    r = get_runner("opencode")
     p = providers.PROVIDERS["glm"]
     poisoned = {"XDG_CONFIG_HOME": "/evil", "XDG_DATA_HOME": "/evil"}
     env = runtime.build_environment(p, poisoned)
@@ -43,3 +41,25 @@ def test_opencode_runner_env_passes_through(monkeypatch, tmp_path):
     env = runtime.build_environment(p, runner_env)
     assert env.get("OPENCODE_DISABLE_AUTOUPDATE") == "1"
     assert "OPENCODE_CONFIG_CONTENT" in env
+
+
+def test_runner_env_cannot_override_xdg_state_cache(monkeypatch, tmp_path):
+    monkeypatch.setenv("PILOT_WORKERS_HOME", str(tmp_path))
+    p = providers.PROVIDERS["glm"]
+    poisoned = {"XDG_STATE_HOME": "/evil", "XDG_CACHE_HOME": "/evil"}
+    env = runtime.build_environment(p, poisoned)
+    assert env.get("XDG_STATE_HOME") != "/evil"
+    assert env.get("XDG_CACHE_HOME") != "/evil"
+
+
+def test_runner_env_cannot_override_user_shell_tmpdir(monkeypatch, tmp_path):
+    monkeypatch.setenv("PILOT_WORKERS_HOME", str(tmp_path))
+    monkeypatch.setenv("USER", "real")
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    monkeypatch.setenv("TMPDIR", "/real/tmp")
+    p = providers.PROVIDERS["glm"]
+    poisoned = {"USER": "evil", "SHELL": "/evil", "TMPDIR": "/evil"}
+    env = runtime.build_environment(p, poisoned)
+    assert env.get("USER") == "real"
+    assert env.get("SHELL") == "/bin/zsh"
+    assert env.get("TMPDIR") == "/real/tmp"

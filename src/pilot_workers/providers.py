@@ -26,6 +26,11 @@ MAX_TASK_BYTES = 512_000
 
 PROVIDERS_DIR = Path(__file__).resolve().parent / "data" / "providers"
 
+# Keys that collide with the install/uninstall CLI grammar
+# ('install <provider> on <host>', 'install runner <name>'); a provider
+# YAML using one of these would make the CLI ambiguous.
+RESERVED_PROVIDER_KEYS = frozenset({"runner", "all", "on", "claude", "codex"})
+
 
 @dataclass(frozen=True)
 class Provider:
@@ -38,6 +43,7 @@ class Provider:
     output_tokens: int
     permissions: str | None = None
     runner: str = "opencode"
+    asset_prefix: str = ""
 
     @property
     def model(self) -> str:
@@ -48,7 +54,10 @@ def _parse_yaml(path: Path) -> dict[str, Any]:
     """Parse a YAML file, with a stdlib fallback for simple flat files."""
     text = path.read_text(encoding="utf-8")
     if yaml is not None:
-        return yaml.safe_load(text)
+        result = yaml.safe_load(text)
+        if not isinstance(result, dict):
+            return {}
+        return result
     # Minimal fallback: flat key: value files without nesting.
     result: dict[str, Any] = {}
     for line in text.splitlines():
@@ -66,6 +75,13 @@ def _parse_yaml(path: Path) -> dict[str, Any]:
     return result
 
 
+def _require_int(value: Any, field: str, path: Path) -> int:
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        raise RuntimeError(f"provider {path.name}: {field} must be an integer, got {value!r}")
+
+
 def load_providers(providers_dir: Path | None = None) -> dict[str, Provider]:
     """Discover and load all provider YAML files from the given directory."""
     directory = providers_dir or PROVIDERS_DIR
@@ -79,16 +95,23 @@ def load_providers(providers_dir: Path | None = None) -> dict[str, Provider]:
         missing = [f for f in required if f not in data]
         if missing:
             raise RuntimeError(f"provider {path.name} missing fields: {', '.join(missing)}")
+        if not isinstance(data["key"], str):
+            raise RuntimeError(f"provider {path.name}: key must be a string, got {type(data['key']).__name__}")
+        if data["key"] in RESERVED_PROVIDER_KEYS:
+            raise RuntimeError(
+                f"provider {path.name} uses reserved key: {data['key']}"
+            )
         provider = Provider(
             key=data["key"],
             provider_id=data["provider_id"],
             model_id=data["model_id"],
             base_url=data["base_url"],
             display_name=data["display_name"],
-            context_tokens=int(data["context_tokens"]),
-            output_tokens=int(data["output_tokens"]),
+            context_tokens=_require_int(data["context_tokens"], "context_tokens", path),
+            output_tokens=_require_int(data["output_tokens"], "output_tokens", path),
             permissions=data.get("permissions") or None,
             runner=data.get("runner") or "opencode",
+            asset_prefix=data.get("asset_prefix") or data["key"],
         )
         if provider.key in providers:
             raise RuntimeError(f"duplicate provider key: {provider.key}")

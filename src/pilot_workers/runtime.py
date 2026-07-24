@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import secrets as secrets_module
 import subprocess
 import sys
 import threading
@@ -73,7 +75,7 @@ def build_environment(provider: Provider, runner_env: dict[str, str]) -> dict[st
 def credential_key(provider: Provider, runner: Runner) -> str:
     path = runner.credential_path(provider)
     if not path.is_file():
-        raise RuntimeError(f"credential missing for {provider.key}; run: pilot-workers configure {provider.key}")
+        raise RuntimeError(f"credential missing for {provider.key}; run: pilot-workers credentials {provider.key}")
     if path.stat().st_mode & 0o077:
         raise RuntimeError(f"credential file is not private (expected mode 0600): {path}")
     try:
@@ -123,8 +125,6 @@ def create_detached_worktree(workdir: Path, worktree_parent: Path) -> Path:
     if status.stdout.strip():
         raise RuntimeError("--worktree requires a clean repository (commit or stash first)")
     ensure_private_directory(worktree_parent)
-    from datetime import datetime, timezone
-    import secrets as secrets_module
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     target = worktree_parent / f"{repository_root.name}-{stamp}-{secrets_module.token_hex(3)}"
     add_result = subprocess.run(
@@ -136,6 +136,10 @@ def create_detached_worktree(workdir: Path, worktree_parent: Path) -> Path:
     try:
         relative = workdir.resolve().relative_to(repository_root)
     except ValueError as exc:
+        subprocess.run(
+            ["git", "-C", str(repository_root), "worktree", "remove", "--force", str(target)],
+            capture_output=True, check=False,
+        )
         raise RuntimeError(f"workdir {workdir} is not inside repository {repository_root}") from exc
     return target / relative
 
@@ -159,7 +163,7 @@ class _SafeRenderer:
         self._writer = writer
         self._broken = False
 
-    def _guard(self, action) -> None:
+    def _guard(self, action: Any) -> None:
         if self._broken or self._writer is None:
             return
         try:
@@ -300,8 +304,6 @@ def run_process(
                     emit_runner_event({"type": "worker_runner.heartbeat",
                                        "elapsed_s": int(elapsed), "silent_s": int(silent)})
                     next_heartbeat_silence = silent + HEARTBEAT_SECONDS
-                else:
-                    next_heartbeat_silence = max(next_heartbeat_silence, HEARTBEAT_SECONDS)
         except KeyboardInterrupt:
             result.interrupted = True; stop_child()
             result.exit_code = process.returncode or 130

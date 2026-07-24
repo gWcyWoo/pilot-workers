@@ -1,8 +1,7 @@
 """OpenCode runner adapter — concrete Runner for the opencode-ai CLI.
 
-This module is the new home for the OpenCode-specific glue that used to live
-inline in ``cli/run.py`` / ``runtime.py`` / ``cli/dispatch.py`` /
-``fmt_events.py``. Behaviour is preserved verbatim from those sources.
+Owns all OpenCode-specific logic: config schema, env vars, CLI flags, event
+translation, and credential format. Upper layers delegate to this adapter.
 """
 
 from __future__ import annotations
@@ -27,22 +26,17 @@ from pilot_workers.runners.base import (
     UnifiedEvent,
 )
 
-
 # Pinned engine version. Single source of truth — install_runtime.sh and
 # everything else reads it from here.
 PINNED_OPENCODE_VERSION = "1.18.4"
 
 # Substring in a tool error message that signals a permission-rule denial.
-# Mirrors the check formerly inlined in ``cli/dispatch.py`` (parse_jsonl,
-# tool_use branch).
 _PERMISSION_DENIED_MARK = "rule which prevents"
 
-# Tools whose output is a file dump or a plain confirmation — the input path
-# already says everything; echoing the output only adds noise. Mirrors
-# ``fmt_events.SILENT_OUTPUT_TOOLS`` (deleted from there).
+# Tools whose output is a file dump or plain confirmation; the renderer
+# shows only the input brief and suppresses the output line.
 SILENT_OUTPUT_TOOLS = {"read", "edit", "write", "list", "todowrite"}
 
-# Renderer input/output limits (mirror fmt_events defaults verbatim).
 _INPUT_LIMIT = 200
 
 
@@ -56,7 +50,7 @@ class OpenCodeRunner(Runner):
     # ------------------------------------------------------------------
 
     def build_config(
-        self, provider: Any, mode: str, permission_profile: str | None = None,
+        self, provider: Provider, mode: str, permission_profile: str | None = None,
     ) -> dict:
         # Thin pass-through to policy.build_config — single source of truth.
         return policy.build_config(
@@ -64,10 +58,10 @@ class OpenCodeRunner(Runner):
         )
 
     def build_command(
-        self, binary: Path, provider: Any, mode: str,
+        self, binary: Path, provider: Provider, mode: str,
         workdir: Path, run_id: str, session: str | None,
     ) -> list[str]:
-        # Mirrors cli/run.py:118-128 exactly.
+
         command = [
             str(binary), "--pure", "run",
             "--model", provider.model,
@@ -81,9 +75,9 @@ class OpenCodeRunner(Runner):
             command.extend(["--session", session])
         return command
 
-    def runner_environment(self, provider: Any, config: dict) -> dict[str, str]:
-        # Mirrors the OpenCode-only slice of the former runtime.build_environment
-        # (runtime.py:47-56). Neutral keys (SAFE_ENV_KEYS, XDG_*, NO_COLOR,
+    def runner_environment(self, provider: Provider, config: dict) -> dict[str, str]:
+
+        # Neutral keys (SAFE_ENV_KEYS, XDG_*, NO_COLOR,
         # CI) are added by the runtime layer, not here.
         paths = profile_paths(provider)
         return {
@@ -100,7 +94,7 @@ class OpenCodeRunner(Runner):
         }
 
     def format_task_input(self, task: str, mode: str) -> str:
-        # Mirrors cli/run.py:117.
+
         return f'<worker-task mode="{mode}">\n{task}\n</worker-task>'
 
     # ------------------------------------------------------------------
@@ -110,7 +104,7 @@ class OpenCodeRunner(Runner):
     def parse_events(self, raw: dict) -> list[UnifiedEvent]:
         """Translate one raw OpenCode event into 0..n UnifiedEvents.
 
-        Behaviour mirrors the union of the former inline translators:
+        Translates raw OpenCode events to UnifiedEvents:
           - cli/dispatch.parse_jsonl (step/text/tool/error branches)
           - fmt_events tool input/output brief extraction
           - runtime.run_process recursive session-id scan
@@ -179,15 +173,14 @@ class OpenCodeRunner(Runner):
         )
 
     def resolve_binary(self) -> Path:
-        # Absorbs runners/opencode.py:verify_binary behaviour, but builds the
-        # path locally so this module is the single source of truth for the
+        # Builds the path locally so this module is the single source of truth for the
         # runner's binary location.
         binary = self.binary_path()
         assert binary is not None
         if not binary.is_file() or not os.access(binary, os.X_OK):
             raise RuntimeError(
                 f"pinned OpenCode {PINNED_OPENCODE_VERSION} is missing; "
-                "run: bash scripts/install_runtime.sh"
+                "run: pilot-workers install runner opencode"
             )
         version = subprocess.run(
             [str(binary), "--version"], text=True, capture_output=True, check=False,
@@ -203,15 +196,15 @@ class OpenCodeRunner(Runner):
             )
         return binary
 
-    def credential_path(self, provider: Any) -> Path:
+    def credential_path(self, provider: Provider) -> Path:
         return profile_root(provider) / "data" / "opencode" / "auth.json"
 
-    def credential_payload(self, provider: Any, key: str) -> dict:
+    def credential_payload(self, provider: Provider, key: str) -> dict:
         return {provider.provider_id: {"type": "api", "key": key}}
 
-    def parse_credential(self, provider: Any, payload: dict) -> str:
-        # Mirrors the validation in the former runtime.credential_key
-        # (runtime.py:73-79).
+    def parse_credential(self, provider: Provider, payload: dict) -> str:
+
+        # See runtime.credential_key for the neutral-layer wrapper.
         entry = payload.get(provider.provider_id)
         if not isinstance(entry, dict) or entry.get("type") != "api":
             raise RuntimeError(
@@ -226,7 +219,7 @@ class OpenCodeRunner(Runner):
 
 
 # ----------------------------------------------------------------------
-# parse_events helpers (mirror cli/dispatch.py:_safe_int semantics exactly)
+# parse_events helpers
 # ----------------------------------------------------------------------
 
 
@@ -281,7 +274,7 @@ def _extract_tool_call(part: Any) -> ToolCall:
         "" if status_value is None else str(status_value)
     )
 
-    input_brief = _tool_input_brief(tool_name, state.get("input") or {})
+    input_brief = _tool_input_brief(state.get("input") or {})
     output_brief = _first_line(state.get("output") or "", _INPUT_LIMIT)
 
     error = None
@@ -306,8 +299,6 @@ def _extract_tool_call(part: Any) -> ToolCall:
         is_permission_denied=is_permission_denied,
         silent_output=silent_output,
     )
-
-
 # ----------------------------------------------------------------------
 # Migrated from fmt_events.py — private, behaviour preserved verbatim.
 # ----------------------------------------------------------------------
@@ -346,7 +337,7 @@ def _first_line(value: str, limit: int) -> str:
     return ""
 
 
-def _tool_input_brief(tool: str, tool_input: dict[str, Any]) -> str:
+def _tool_input_brief(tool_input: dict[str, Any]) -> str:
     for key in ("command", "filePath", "pattern", "path", "query", "url"):
         value = tool_input.get(key)
         if value:
@@ -355,12 +346,6 @@ def _tool_input_brief(tool: str, tool_input: dict[str, Any]) -> str:
                 text = _short_path(text)
             return _trim(text.replace("\n", " "), _INPUT_LIMIT)
     return _trim(json.dumps(tool_input, ensure_ascii=False), _INPUT_LIMIT) if tool_input else ""
-
-
-# ----------------------------------------------------------------------
-# Migrated from runtime.session_ids — recursive session-id scan, used by
-# parse_events. The neutral runtime no longer knows this shape.
-# ----------------------------------------------------------------------
 
 
 def _session_ids(value: Any) -> list[str]:

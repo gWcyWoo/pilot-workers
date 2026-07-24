@@ -200,8 +200,8 @@ def load_permission_profile(name: str) -> dict[str, Any]:
         raise RuntimeError(f"permission profile not found: {path}")
     if yaml is None:
         raise RuntimeError(
-            f"pyyaml is required for custom permission profiles; "
-            f"install it with: pip install pyyaml"
+            "pyyaml is required for custom permission profiles; "
+            "install it with: pip install pyyaml"
         )
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
