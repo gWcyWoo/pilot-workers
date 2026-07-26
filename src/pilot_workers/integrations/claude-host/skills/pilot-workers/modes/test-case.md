@@ -17,16 +17,20 @@ holds the craft for this one mode.)
      under test, never change existing tests unless the task says so, never
      add dependencies, never restructure the test directory. Spell out every
      constraint — an unlisted boundary is an invisible one.
-- One dispatch covers test cases for one cohesive unit (a module, a class,
-  a feature surface); split larger scopes into multiple workers.
+- **ALL RED — zero exceptions.** The worker runs the generated tests and
+  every single one must FAIL. A test that passes is not testing new
+  behavior — the worker rewrites it until it fails. This is the contract.
+- **This mode is batch test generation, not vertical-slice TDD.** One
+  dispatch covers all test cases for a cohesive unit (a module, a class, a
+  feature surface). Do NOT dispatch test-case once per test — that is
+  vertical-slice TDD, and it stays in the main session: write one test
+  yourself, dispatch code to make it green, repeat. Use test-case mode only
+  when the interface is settled and you know the full test surface upfront.
+  Split larger scopes into multiple workers, not into one-test dispatches.
 - **Always dispatch with `--worktree`** — test-case writes new files and
   must not collide with a code worker running on the main workdir. See
   "Parallel test-case + code workflow" in the core SKILL.md for the full
-  dispatch → merge → test → cleanup sequence.
-- **After both workers finish:** commit the worktree's changes, merge into
-  main (`git merge` or cherry-pick), then dispatch test on the merged tree.
-  Clean up with `pilot-workers maintain worktrees remove <path>` once test
-  passes.
+  parallel sequence and merge timing.
 - Verify by running the generated tests yourself. Compare the worker's
   `FILES_CHANGED` against `git diff --stat` + `git status --short` — any
   source file (non-test) in the diff is a boundary violation.

@@ -30,6 +30,13 @@ LEARN (trace a flow, understand a module, gather context for a change) is an
 explore dispatch no matter how few files; verifying a KNOWN location (a cited
 file:line, a returned diff, a verdict) is local reading and needs no worker.
 
+**test-case routing classification.** A request that bundles production code +
+tests ("implement X with tests") routes to `code` — the tests will pass after
+the code change, which violates test-case's ALL RED contract. `test-case` is
+standalone batch test generation against behavior that does not exist yet. One
+dispatch covers a cohesive unit; never dispatch test-case once per individual
+test — that is vertical-slice TDD and stays in this session.
+
 ## Quick Reference
 
 0. **Choose `<key>` by priority.** (1) Explicit user input always wins: a
@@ -121,7 +128,7 @@ partial), `unavailable` (no block at all — the worker ignored the contract).
 
 ## Parallel test-case + code workflow
 
-When both test-case and code are routed, run them in parallel and merge:
+When both test-case and code are routed, run them in parallel:
 
 1. **Dispatch both simultaneously** — test-case with `--worktree` (isolated
    copy), code on the main workdir. Two background shells, both started
@@ -130,23 +137,30 @@ When both test-case and code are routed, run them in parallel and merge:
    pilot-workers dispatch --provider <tc-key> --mode test-case --workdir "$PWD" --task-file <tc-task> --worktree &
    pilot-workers dispatch --provider <code-key> --mode code --workdir "$PWD" --task-file <code-task> &
    ```
-2. **Wait for both to complete.** Harvest each verdict independently.
-3. **Merge test-case into main.** The worktree path is in the
-   `worker_runner.started` JSON. Test files are new files; source changes are
-   in main — conflicts are rare.
+2. **test-case must be ALL RED** — every generated test must fail. A test
+   that passes is not testing new behavior; the worker rewrites it.
+   **code must be ALL GREEN** — its validation is regression verification.
+3. **Merge depends on who finishes first:**
+   - **test-case first** → merge test files into the main workdir
+     immediately. Code is still running; its validation step will discover
+     the new tests. Code's validation becomes both regression AND new-test
+     verification.
+   - **code first** → code's validation is regression-only (no new tests
+     yet). Wait for test-case to finish, then merge test files.
+4. **Main session always validates as the final step** — run the project's
+   test command locally after merge, regardless of which path was taken.
+   This is the authoritative result; worker validations are process signals.
    ```bash
    cd <worktree-path> && git add -A && git commit -m "test-case: <summary>"
    cd "$PWD" && git merge <worktree-branch>   # or cherry-pick
+   # run tests locally
    ```
-4. **Dispatch test** on the merged tree — the tests were written by
-   test-case, the code was written by code, now verify them together.
-5. **Clean up** once test passes:
+5. **Clean up** once tests pass:
    ```bash
    pilot-workers maintain worktrees remove <worktree-path>
    ```
-   If test fails, fix in the main session and re-run — the failure tells you
-   whether the interface changed (code's fault) or the test is wrong
-   (test-case's fault).
+   If tests fail, the failure tells you whether the interface changed
+   (code's fault) or the test is wrong (test-case's fault).
 
 <!--PILOT_GENERATED_BEGIN-->
 <!--PILOT_GENERATED_END-->
