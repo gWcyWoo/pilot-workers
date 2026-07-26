@@ -1177,3 +1177,92 @@ def test_a_file_dropped_from_the_packaged_tree_stops_being_deployed(isolated, ca
     recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert str(stale) not in recorded["installs"]["claude"]["files"]
     assert "removed stale" in capsys.readouterr().out
+
+
+# ----------------------------------------------------------------------
+# The trigger must fire on the WORK, not on a provider name.
+#
+# The whole point of `install ds on claude for explore` is that the user says
+# "explore this codebase" and the system picks ds. The generated description
+# ended with "Trigger when the user names a worker provider — ds, kimi-k3",
+# which is the most specific clause in it and therefore the operative one, so a
+# prompt that named no provider never loaded the skill — and the mode -> provider
+# table lives in the BODY, readable only after loading. The assignment was
+# unreachable at trigger time: recorded, displayed by `status`, rendered into the
+# skill, and never able to fire.
+# ----------------------------------------------------------------------
+
+def _deployed_description(isolated, providers_and_modes):
+    """Install a host with the given config and return its rendered description."""
+    with install_mod.manifest_transaction() as installs:
+        for key in providers_and_modes["providers"]:
+            install_mod.add_host_provider(installs, "claude", key)
+        for mode, key in providers_and_modes["modes"].items():
+            install_mod.set_host_mode(installs, "claude", mode, key)
+    install_mod.main(["claude", "--target", str(isolated["target"])])
+    text = _claude_skill(isolated).read_text(encoding="utf-8")
+    front = install_mod._frontmatter_block(text)
+    assert front is not None
+    return " ".join(front.split())
+
+
+def test_the_description_triggers_on_an_assigned_mode(isolated):
+    """A prompt like "explore this codebase" must be able to match.
+
+    Asserted on the exact ROUTING form, not on the mode word: the description's
+    first sentence already lists every mode ("bounded tasks (code, explore,
+    test, review, resume)"), so a substring check for "explore" passes whatever
+    the trigger says. The first version of this test did exactly that and passed
+    against the broken description.
+    """
+    description = _deployed_description(isolated, {
+        "providers": ["ds", "kimi-k3"],
+        "modes": {"explore": "ds", "test": "ds",
+                  "code": "kimi-k3", "review": "kimi-k3"},
+    })
+    assert "explore, test → ds" in description, description
+    assert "code, review → kimi-k3" in description, description
+
+
+def test_the_description_no_longer_makes_a_provider_name_the_condition(isolated):
+    """The narrowing sentence that defeated the whole feature must be gone."""
+    description = _deployed_description(isolated, {
+        "providers": ["ds"], "modes": {"explore": "ds"},
+    })
+    assert "Trigger when the user names a worker provider" not in description, (
+        "the operative clause still requires the user to name a provider")
+
+
+def test_naming_a_provider_directly_still_triggers(isolated):
+    """The old path must survive: "use ds to ..." is still a valid way in."""
+    description = _deployed_description(isolated, {
+        "providers": ["ds"], "modes": {"explore": "ds"},
+    })
+    assert "ds" in description
+
+
+def test_a_host_with_no_mode_assignments_does_not_claim_mode_triggering(isolated):
+    """Nothing is routed, so the skill must not advertise that it handles a mode."""
+    description = _deployed_description(isolated, {
+        "providers": ["ds"], "modes": {},
+    })
+    assert "ds" in description
+    for mode in ("explore", "test", "review"):
+        assert f"{mode} →" not in description and f"{mode} ->" not in description, (
+            f"a host with no assignments claims to route {mode}")
+
+
+def test_an_unassigned_mode_is_not_advertised(isolated):
+    """Only what is actually routed. `code` has no provider here."""
+    description = _deployed_description(isolated, {
+        "providers": ["ds"], "modes": {"explore": "ds"},
+    })
+    routing = install_mod.render_trigger_sentence(["ds"], {"explore": "ds"})
+    assert "explore → ds" in routing
+    # Scoped to the GENERATED clause: the hand-written prose above it legitimately
+    # mentions "bulk mechanical edits" as an example of delegable work, so a check
+    # against the whole description flagged text that was never the problem.
+    for mode in ("code", "review", "test"):
+        assert f"{mode} →" not in routing, (
+            f"the routing clause advertises {mode}, which nothing is assigned to")
+    assert "explore → ds" in description, description

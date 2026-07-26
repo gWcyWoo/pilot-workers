@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pilot-workers"
-version = "0.5.2"
+version = "0.5.3"
 description = "Dispatch bounded tasks to isolated LLM workers (GLM, Kimi, and more)"
 readme = "README.md"
 license = "MIT"

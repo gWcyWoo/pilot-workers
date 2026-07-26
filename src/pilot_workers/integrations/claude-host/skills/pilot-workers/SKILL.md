@@ -1,6 +1,6 @@
 ---
 name: pilot-workers
-description: Dispatch bounded tasks (code, explore, test, review, resume) to isolated LLM workers via the pilot-workers CLI and harvest their structured verdicts. Use whenever a task is worth delegating — bulk mechanical edits, codebase exploration, long test runs, multi-axis code review — so the main session keeps its context for planning and verification. Not for small tweaks, tasks needing mid-course judgment, or anything touching credentials/CI/production. Trigger when the user names a worker provider — {{PILOT_PROVIDER_TRIGGERS}}.
+description: Dispatch bounded tasks (code, explore, test, review, resume) to isolated LLM workers via the pilot-workers CLI and harvest their structured verdicts. Use whenever a task is worth delegating — bulk mechanical edits, codebase exploration, long test runs, multi-axis code review — so the main session keeps its context for planning and verification. Not for small tweaks, tasks needing mid-course judgment, or anything touching credentials/CI/production. {{PILOT_PROVIDER_TRIGGERS}}
 ---
 
 # pilot-workers Playbook

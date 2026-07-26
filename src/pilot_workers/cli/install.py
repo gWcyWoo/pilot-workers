@@ -495,15 +495,52 @@ def apply_generated_region(skill_text: str, region: str) -> str:
     return before + GENERATED_BEGIN + inner + GENERATED_END + after
 
 
+def render_trigger_sentence(provider_keys: list[str],
+                            modes: dict[str, str]) -> str:
+    """The frontmatter's trigger clause, generated from the host's ROUTING.
+
+    This is the only part of the skill a model sees before deciding whether to
+    load it, so it decides what the whole feature can do. It used to read
+    "Trigger when the user names a worker provider — ds, kimi-k3", which is the
+    most specific clause in the description and therefore the operative one — so
+    "explore this codebase" never loaded the skill, and the mode -> provider table
+    (which lives in the BODY) was never read. The assignment recorded by
+    ``install ds on claude for explore`` was unreachable at trigger time: stored,
+    displayed by ``status``, rendered into the skill, and unable to fire.
+
+    The point of the assignment is that the user does NOT name a provider. So the
+    modes come first, in an explicit ``mode, mode -> provider`` form, and naming a
+    provider stays as an additional path. A host with no assignments routes
+    nothing and must not claim otherwise.
+    """
+    names = ", ".join(provider_keys)
+    routed: dict[str, list[str]] = {}
+    for mode, key in sorted(modes.items()):
+        if key in provider_keys:
+            routed.setdefault(key, []).append(mode)
+    if not routed:
+        return (f"No mode is routed on this host yet, so nothing is delegated "
+                f"automatically; naming a provider ({names}) triggers this skill.")
+    groups = "; ".join(
+        f"{', '.join(sorted(mode_list))} \u2192 {key}"
+        for key, mode_list in sorted(routed.items()))
+    return (f"Route by MODE, not by name: {groups}. A request for that kind of "
+            f"work triggers this skill even when the user names no provider — "
+            f"which is the point of the routing — and naming one ({names}) "
+            f"triggers it too.")
+
+
 def substitute_trigger_placeholder(skill_text: str,
-                                   provider_keys: list[str]) -> str:
-    """Fill the frontmatter trigger token with the host's provider keys.
+                                   provider_keys: list[str],
+                                   modes: dict[str, str] | None = None) -> str:
+    """Fill the frontmatter trigger token.
 
     Pure string function: a host's deployed skill names exactly the providers
     configured for it, so "use <provider>" reaches the skill without leaking
     the names of providers the host never got.
     """
-    return skill_text.replace(TRIGGER_PLACEHOLDER, ", ".join(provider_keys))
+    return skill_text.replace(
+        TRIGGER_PLACEHOLDER, render_trigger_sentence(provider_keys, modes or {}))
 
 
 def _frontmatter_block(text: str) -> str | None:
@@ -537,7 +574,8 @@ def _render_deployed_skill(installs: dict, host: str, base_text: str) -> str:
     could never drop a provider that was uninstalled later.
     """
     provider_keys = host_providers(installs, host)
-    region = render_worker_region(provider_keys, host_modes(installs, host))
+    modes = host_modes(installs, host)
+    region = render_worker_region(provider_keys, modes)
     try:
         out = apply_generated_region(base_text, region)
     except RuntimeError:
@@ -551,7 +589,7 @@ def _render_deployed_skill(installs: dict, host: str, base_text: str) -> str:
         out = apply_generated_region(_packaged_skill_text(host), region)
     new_front = _frontmatter_block(
         substitute_trigger_placeholder(_packaged_skill_text(host),
-                                       provider_keys))
+                                       provider_keys, modes))
     old_front = _frontmatter_block(out)
     if new_front is not None and old_front is not None:
         out = new_front + out[len(old_front):]

@@ -150,3 +150,33 @@ def test_common_prompt_exists_and_has_no_result_block():
     assert RESULT_END not in text, (
         "common.md must not contain the result block (it is per-mode)"
     )
+
+
+def test_no_host_template_hardcodes_its_own_trigger_condition():
+    """Both templates must hand the whole trigger clause to the placeholder.
+
+    The clause is generated from the host's routing, so any wording left in the
+    template competes with it — and the first pass at this fix patched the claude
+    template and missed the codex one, which phrased the same sentence
+    differently. Sibling-miss number twelve; the guard costs four lines.
+    """
+    from pathlib import Path as _Path
+
+    import pilot_workers
+    from pilot_workers.cli import install as install_mod
+
+    root = _Path(pilot_workers.__file__).resolve().parent / "integrations"
+    offenders = []
+    for host in ("claude", "codex"):
+        path = root / f"{host}-host" / "skills" / "pilot-workers" / "SKILL.md"
+        front = install_mod._frontmatter_block(
+            path.read_text(encoding="utf-8")) or ""
+        normalised = " ".join(front.split())
+        assert install_mod.TRIGGER_PLACEHOLDER in normalised, (
+            f"{host}: the template lost its trigger placeholder")
+        for phrase in ("Trigger when the user names",
+                       "asks to delegate",
+                       "to a worker model —"):
+            if phrase in normalised:
+                offenders.append(f"{host}: still hardcodes {phrase!r}")
+    assert not offenders, "; ".join(offenders)
