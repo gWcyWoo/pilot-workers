@@ -312,3 +312,214 @@ def test_run_validate_resume_with_session_and_run_id_ok():
 def test_run_validate_run_id_outside_resume_raises():
     with pytest.raises(RuntimeError, match="--run-id"):
         run_mod.validate_mode_arguments(_mode_ns(mode="code", run_id="r-1"))
+
+
+# ----------------------------------------------------------------------
+# A resumed run must be resumable AGAIN.
+#
+# `run.py` always mints a fresh run_id, then resume keys the sandbox to
+# `--run-id` while naming logs, the started/summary events and (through
+# dispatch) verdict.json/report.md with the new one. A planner that resumes
+# twice passes the id it was handed, `run_paths` misses, and the error blames
+# retention: "session expired past retention; redispatch cold" — with the
+# sandbox sitting right there under its original name.
+#
+# The fresh id for the LOG is required: `open_private_text` is O_CREAT|O_EXCL,
+# so a resume cannot reuse the original jsonl. The id to resume with is
+# therefore reported separately rather than conflated.
+# ----------------------------------------------------------------------
+
+def test_the_started_event_names_the_sandbox_to_resume_with(tmp_path, monkeypatch):
+    """The whole chain in one assertion: whatever a resume reports as the id to
+    resume with must be the sandbox that actually exists."""
+    import json
+
+    from pilot_workers import providers as providers_mod
+    from pilot_workers import runtime as runtime_mod
+    from pilot_workers.cli import run as run_mod
+
+    monkeypatch.setenv("PILOT_WORKERS_HOME", str(tmp_path / "home"))
+    provider = providers_mod.PROVIDERS["glm"]
+    original = "20260101T000000Z-deadbeef"
+    sandbox = providers_mod.run_paths(provider, original)
+    for key in ("root", "config", "data", "state"):
+        sandbox[key].mkdir(parents=True, exist_ok=True)
+
+    captured: list = []
+
+    def fake_run_process(*args, **kwargs):
+        return runtime_mod.RunResult(exit_code=0, session_id="ses-1")
+
+    monkeypatch.setattr(runtime_mod, "run_process", fake_run_process)
+    monkeypatch.setattr(runtime_mod, "credential_key",
+                        lambda p, r, **kw: "k" * 20)
+    monkeypatch.setattr(
+        "pilot_workers.runners.opencode_runner.OpenCodeRunner.resolve_binary",
+        lambda self: tmp_path / "fake-binary")
+
+    real_print = print
+
+    import builtins
+
+    def capture(*args, **kwargs):
+        if args and isinstance(args[0], str) and args[0].startswith("{"):
+            captured.append(json.loads(args[0]))
+        return real_print(*args, **kwargs)
+
+    monkeypatch.setattr(builtins, "print", capture)
+    rc = run_mod.main([
+        "--provider", "glm", "--mode", "resume", "--session", "ses-1",
+        "--run-id", original, "--workdir", str(tmp_path),
+        "--task", "carry on",
+    ])
+    monkeypatch.setattr(builtins, "print", real_print)
+    assert rc == 0, captured
+
+    started = next(e for e in captured
+                   if e.get("type") == "worker_runner.started")
+    resume_with = started.get("resume_run_id")
+    assert resume_with == original, (
+        f"started reports {resume_with!r} but the sandbox is {original!r}")
+    assert providers_mod.run_paths(provider, resume_with)["root"].is_dir(), (
+        "the reported id does not name a sandbox that exists")
+    summary = next(e for e in captured
+                   if e.get("type") == "worker_runner.summary")
+    assert summary.get("resume_run_id") == original
+
+
+def test_a_cold_run_reports_its_own_run_id_as_the_resume_id(tmp_path, monkeypatch):
+    """Reverse assertion: for a fresh run the two ids are the same, so a planner
+    can use one field unconditionally."""
+    import builtins
+    import json
+
+    from pilot_workers import runtime as runtime_mod
+    from pilot_workers.cli import run as run_mod
+
+    monkeypatch.setenv("PILOT_WORKERS_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(
+        runtime_mod, "run_process",
+        lambda *a, **k: runtime_mod.RunResult(exit_code=0, session_id="s"))
+    monkeypatch.setattr(runtime_mod, "credential_key",
+                        lambda p, r, **kw: "k" * 20)
+    monkeypatch.setattr(
+        "pilot_workers.runners.opencode_runner.OpenCodeRunner.resolve_binary",
+        lambda self: tmp_path / "fake-binary")
+
+    captured: list = []
+    real_print = print
+
+    def capture(*args, **kwargs):
+        if args and isinstance(args[0], str) and args[0].startswith("{"):
+            captured.append(json.loads(args[0]))
+        return real_print(*args, **kwargs)
+
+    monkeypatch.setattr(builtins, "print", capture)
+    rc = run_mod.main(["--provider", "glm", "--mode", "review",
+                       "--workdir", str(tmp_path), "--task", "look"])
+    monkeypatch.setattr(builtins, "print", real_print)
+    assert rc == 0, captured
+    started = next(e for e in captured if e.get("type") == "worker_runner.started")
+    assert started["resume_run_id"] == started["run_id"]
+
+
+def test_a_dangling_cache_symlink_is_replaced_not_a_crash(tmp_path, monkeypatch):
+    """`exists()` follows the link, so a dangling cache symlink read as absent and
+    os.symlink then raised FileExistsError. The round-17 guard had no test."""
+    from pilot_workers import providers as providers_mod
+    from pilot_workers import runtime as runtime_mod
+    from pilot_workers.runners import get_runner
+
+    monkeypatch.setenv("PILOT_WORKERS_HOME", str(tmp_path / "home"))
+    provider = providers_mod.PROVIDERS["glm"]
+    run_id = "20260101T000000Z-cachelnk"
+    paths = providers_mod.run_paths(provider, run_id)
+    paths["root"].mkdir(parents=True)
+    import os as _os
+    _os.symlink(str(tmp_path / "gone-away"), str(paths["cache"]))
+    assert paths["cache"].is_symlink() and not paths["cache"].exists()
+
+    result = runtime_mod.provision_run_sandbox(
+        provider, run_id, get_runner(provider.runner))
+    assert result["root"].is_dir()
+
+
+def test_a_resumed_run_names_its_logs_after_the_sandbox(tmp_path, monkeypatch):
+    """The WRITER half of the naming contract, which had no test.
+
+    `cleanup_logs` and `_run_log_files` both depend on a resumed attempt's files
+    being named `<sandbox_id>+<attempt_id>`, and both have tests. Reverting the
+    naming in run.py left them green — the readers simply never see a `+` name.
+    Found by hunk-reverting this session's own fix, not by reading it.
+    """
+    import builtins
+    import json
+    from pathlib import Path as _Path
+
+    from pilot_workers import providers as providers_mod
+    from pilot_workers import runtime as runtime_mod
+    from pilot_workers.cli import run as run_mod
+
+    monkeypatch.setenv("PILOT_WORKERS_HOME", str(tmp_path / "home"))
+    provider = providers_mod.PROVIDERS["glm"]
+    original = "20260101T000000Z-deadbee1"
+    sandbox = providers_mod.run_paths(provider, original)
+    for key in ("root", "config", "data", "state"):
+        sandbox[key].mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(
+        runtime_mod, "run_process",
+        lambda *a, **k: runtime_mod.RunResult(exit_code=0, session_id="s"))
+    monkeypatch.setattr(runtime_mod, "credential_key",
+                        lambda p, r, **kw: "k" * 20)
+    monkeypatch.setattr(
+        "pilot_workers.runners.opencode_runner.OpenCodeRunner.resolve_binary",
+        lambda self: tmp_path / "fake-binary")
+
+    captured: list = []
+    real_print = print
+
+    def capture(*args, **kwargs):
+        if args and isinstance(args[0], str) and args[0].startswith("{"):
+            captured.append(json.loads(args[0]))
+        return real_print(*args, **kwargs)
+
+    monkeypatch.setattr(builtins, "print", capture)
+    rc = run_mod.main([
+        "--provider", "glm", "--mode", "resume", "--session", "ses-1",
+        "--run-id", original, "--workdir", str(tmp_path), "--task", "carry on"])
+    monkeypatch.setattr(builtins, "print", real_print)
+    assert rc == 0, captured
+
+    started = next(e for e in captured if e["type"] == "worker_runner.started")
+    stem = _Path(started["log"]).name[: -len(".jsonl")]
+    assert stem.startswith(f"{original}+"), (
+        f"a resumed attempt's log is named {stem!r}; the lifecycle tools derive "
+        f"the sandbox from the part before '+'")
+    assert stem != original, "the attempt must not reuse the original log name"
+
+
+@pytest.mark.parametrize("bad", ["a/b", "a\\b", ".hidden", "a+b",
+                                 "20260101T000000Z-aaaa+bbbb"])
+def test_run_id_rejects_every_character_the_convention_relies_on(bad):
+    """`--run-id` rejected path separators and a leading dot; round 22 added `+`
+    because the whole `<sandbox>+<attempt>` artifact naming depends on it never
+    occurring in a run id. The validation had NO test — `grep "invalid --run-id"
+    tests/` was empty, which is how kimi found it.
+
+    Asserted through validate_mode_arguments, where the check now lives: it used
+    to sit in main() AFTER resolve_binary and credential_key, so on a machine
+    without the runtime installed a bad --run-id surfaced as "runtime is missing".
+    """
+    args = argparse.Namespace(
+        mode="resume", session="ses-1", run_id=bad, worktree=False)
+    with pytest.raises(RuntimeError, match="invalid --run-id"):
+        run_mod.validate_mode_arguments(args)
+
+
+def test_a_well_formed_run_id_passes(  # reverse assertion
+):
+    args = argparse.Namespace(
+        mode="resume", session="ses-1", run_id="20260101T000000Z-abcdef01",
+        worktree=False)
+    run_mod.validate_mode_arguments(args)

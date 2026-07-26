@@ -31,7 +31,12 @@ def test_template_valid_mode_prints_template(capsys):
     assert main_mod.main(["template", "code"]) == 0
     out = capsys.readouterr().out
     assert "# Objective" in out
-    assert "Never include any credentials" in out
+    # The credential warning used to live here as prose. It is now a hard check
+    # in taskguard, so assert the CHECK exists rather than the wording.
+    from pilot_workers import taskguard
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="credential"):
+        taskguard.check_task("token: ghp_" + "a" * 24, known_secrets=[])
 
 
 def test_template_each_mode_nonempty(capsys):
@@ -100,3 +105,34 @@ def test_uninstall_routes_and_fails_without_manifest(tmp_path, monkeypatch, caps
     rc = main_mod.main(["uninstall", "claude"])
     assert rc == 1
     assert "no install manifest" in capsys.readouterr().err
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def test_usage_does_not_deny_the_implemented_grammar(capsys):
+    """The top-level usage claimed `<provider> on <host>` was 'no longer
+    accepted' — the first screen a user sees, contradicting what the parser now
+    does."""
+    main_mod.main([])
+    out = _flat(capsys.readouterr().out)
+    assert "no longer accepted" not in out
+
+
+def test_usage_lists_the_provider_forms(capsys):
+    main_mod.main([])
+    out = _flat(capsys.readouterr().out)
+    assert "<provider> on <host>" in out
+    assert "for <mode>" in out
+
+
+def test_usage_matches_the_install_parser(capsys):
+    """Every form the usage advertises must actually parse."""
+    from pilot_workers.cli import install as install_mod
+
+    for argv in (["claude"], ["all"], ["runner", "opencode"],
+                 ["glm", "on", "claude"], ["glm", "on", "claude", "for", "code"]):
+        spec = install_mod._parse_grammar(
+            argv, "install", install_mod.INSTALL_USAGE)
+        assert spec, f"advertised form does not parse: {argv}"

@@ -199,7 +199,8 @@ def test_credential_preflight_failure_spawns_nothing(
     assert rc == 2
     err = capsys.readouterr().err
     assert "credential missing for glm" in err
-    assert "pilot-workers credentials glm" in err
+    # A runnable command, not a placeholder the reader has to substitute into.
+    assert "pilot-workers install glm on claude --global-key" in err
 
 
 def _write_jobs_file(tmp_path, jobs):
@@ -447,3 +448,92 @@ def test_popen_called_with_start_new_session(
     assert all(
         kwargs.get("start_new_session") is True for kwargs in recorded_kwargs
     )
+
+
+@pytest.mark.parametrize("bad", ["false", "true", 0, 1, "yes", None])
+def test_a_jobs_file_worktree_must_be_a_real_boolean(tmp_path, bad):
+    """`bool("false")` is True, so a JSON string arrived as the opposite of what
+    it said — and worktree is what keeps two concurrent code jobs out of each
+    other's working directory. Every other field was validated strictly."""
+    import json
+
+    from pilot_workers.cli import fanout as fanout_mod
+
+    task = tmp_path / "t.md"
+    task.write_text("do a thing", encoding="utf-8")
+    jobs = tmp_path / "jobs.json"
+    jobs.write_text(json.dumps([
+        {"provider": "glm", "mode": "code", "task_file": str(task),
+         "worktree": bad}]), encoding="utf-8")
+
+    with pytest.raises(fanout_mod._SpecError, match="worktree"):
+        fanout_mod._load_jobs_file(str(jobs))
+
+
+@pytest.mark.parametrize("good", [True, False])
+def test_a_real_boolean_worktree_is_accepted(tmp_path, good):
+    import json
+
+    from pilot_workers.cli import fanout as fanout_mod
+
+    task = tmp_path / "t.md"
+    task.write_text("do a thing", encoding="utf-8")
+    jobs = tmp_path / "jobs.json"
+    jobs.write_text(json.dumps([
+        {"provider": "glm", "mode": "code", "task_file": str(task),
+         "worktree": good}]), encoding="utf-8")
+
+    assert fanout_mod._load_jobs_file(str(jobs))[0].worktree is good
+
+
+def test_a_synthesized_verdict_redacts_every_configured_key(tmp_path, monkeypatch, capsys):
+    """fanout builds its OWN verdict when a child dies, and that tail goes to the
+    planner. The redaction at both call sites was added with NO test — found by
+    reverting each source hunk of the change set and watching the suite stay
+    green, not by reading the code again.
+
+    `run_process` redacts only the key it was handed; a synthesized tail can
+    mention any provider's key, so it must go through redact_secrets.
+    """
+    from pilot_workers import runtime
+    from pilot_workers.cli import fanout as fanout_mod
+
+    secret = "sk-other-provider-key-1234567890"
+    task = tmp_path / "t.md"
+    task.write_text("review the parser", encoding="utf-8")
+    monkeypatch.setattr(runtime, "configured_secrets", lambda: [secret])
+    monkeypatch.setattr(
+        runtime, "credential_metadata",
+        lambda provider, runner: {"configured": True, "secure_mode": True})
+
+    class Exploding:
+        def __init__(self, cmd, **kwargs):
+            raise OSError(f"spawn failed: {secret} was in the environment")
+
+    monkeypatch.setattr("pilot_workers.cli.fanout.subprocess.Popen", Exploding)
+    fanout_mod.main(["--workdir", str(tmp_path), "--job", f"glm:review:{task}"])
+
+    out = capsys.readouterr().out
+    assert secret not in out, "a synthesized verdict carried a raw key to stdout"
+    assert "[REDACTED]" in out
+
+
+def test_a_provider_naming_an_unregistered_runner_is_a_spec_error(monkeypatch, tmp_path):
+    """get_runner raises a plain RuntimeError; fanout's guard catches only
+    _SpecError, so without the translation it left a traceback where every other
+    bad job spec gives one clean line. Added in round 16 with no test."""
+    from dataclasses import replace
+
+    from pilot_workers import providers as providers_mod
+    from pilot_workers.cli import fanout as fanout_mod
+
+    monkeypatch.setitem(
+        providers_mod.PROVIDERS, "badrunner",
+        replace(providers_mod.PROVIDERS["glm"], key="badrunner",
+                runner="nosuchrunner"))
+    task = tmp_path / "t.md"
+    task.write_text("review it", encoding="utf-8")
+
+    with pytest.raises(fanout_mod._SpecError, match="nosuchrunner"):
+        fanout_mod._validate_job(fanout_mod.Job(
+            provider="badrunner", mode="review", task_file=str(task)))

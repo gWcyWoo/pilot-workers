@@ -223,3 +223,112 @@ def test_status_json_provider_entries_include_metadata(tmp_path, monkeypatch, ca
                 f"status --json provider {key!r} missing field {field!r}"
             )
             assert isinstance(entry[field], str)
+
+
+# ----------------------------------------------------------------------
+# The no-pyyaml fallback must agree with pyyaml on the file shape this
+# package tells an author to write.
+#
+# `data/providers/README.md` documents the seven required fields WITH a
+# trailing `# comment` on every line. The fallback used to keep the comment
+# inside the value, so `key:` became a provider key with a comment in it —
+# and `providers.profile_root` uses that key verbatim as a directory name.
+# Nothing raised. `pyyaml` is optional by design, so the two parsers reading
+# the same file differently is the defect, not the fallback existing.
+# ----------------------------------------------------------------------
+
+DOCUMENTED_TEMPLATE = """\
+key: myprov                        # used as --provider argument and directory name
+provider_id: myprov-worker          # OpenCode provider ID (arbitrary, must be unique)
+model_id: my-model-1                # model ID sent to the API
+base_url: https://api.example.invalid/v1   # official API endpoint (HTTPS only, no relay)
+display_name: My Model              # shown in logs and config
+context_tokens: 128000              # max context window
+output_tokens: 32000                # max output tokens
+"""
+
+
+@pytest.fixture
+def no_pyyaml(monkeypatch):
+    """Force the stdlib fallback path regardless of what is installed."""
+    monkeypatch.setattr(providers, "yaml", None)
+
+
+def test_the_fallback_reads_the_documented_template_like_pyyaml(tmp_path, no_pyyaml):
+    (tmp_path / "myprov.yaml").write_text(DOCUMENTED_TEMPLATE, encoding="utf-8")
+    p = load_providers(tmp_path)["myprov"]
+    assert p.key == "myprov", "the inline comment landed in the provider key"
+    assert p.provider_id == "myprov-worker"
+    assert p.model_id == "my-model-1"
+    assert p.base_url == "https://api.example.invalid/v1"
+    assert p.display_name == "My Model"
+    assert p.context_tokens == 128000
+    assert p.output_tokens == 32000
+
+
+def test_the_fallback_agrees_with_pyyaml_field_for_field(tmp_path, monkeypatch):
+    """Parity, not a hand-written expectation: whichever parser runs, the
+    provider a user gets from one file must be the same provider."""
+    pytest.importorskip("yaml")
+    (tmp_path / "myprov.yaml").write_text(DOCUMENTED_TEMPLATE, encoding="utf-8")
+    with_yaml = load_providers(tmp_path)["myprov"]
+    monkeypatch.setattr(providers, "yaml", None)
+    without_yaml = load_providers(tmp_path)["myprov"]
+    assert without_yaml == with_yaml
+
+
+@pytest.mark.parametrize("line,expected", [
+    # Ground truth taken from pyyaml itself, not from reading its docs.
+    ("bare   # trailing", "bare"),
+    ('"quoted" # trailing', "quoted"),
+    ("'single' # trailing", "single"),
+    ("model #1 for speed", "model"),      # whitespace before # => comment
+    ("glm#5", "glm#5"),                   # no whitespace before # => literal
+    ('a "b" c', 'a "b" c'),               # quote not at the start => literal
+    ("it's fine", "it's fine"),
+    ("plain", "plain"),
+])
+def test_fallback_scalars_match_pyyaml(tmp_path, no_pyyaml, line, expected):
+    text = VALID_PROVIDER_YAML + f"notes: {line}\n"
+    (tmp_path / "testp.yaml").write_text(text, encoding="utf-8")
+    assert load_providers(tmp_path)["testp"].notes == expected
+
+
+def test_a_quoted_number_with_a_comment_is_still_an_integer(tmp_path, no_pyyaml):
+    """`context_tokens: 128000   # max context window` is an int to pyyaml. The
+    comment has to come off BEFORE the numeric check, or the field is rejected."""
+    text = VALID_PROVIDER_YAML.replace(
+        "context_tokens: 100000", "context_tokens: 100000   # max context window")
+    (tmp_path / "testp.yaml").write_text(text, encoding="utf-8")
+    assert load_providers(tmp_path)["testp"].context_tokens == 100000
+
+
+def test_the_fallback_refuses_an_unterminated_quote(tmp_path, no_pyyaml):
+    """pyyaml raises a ScannerError here. Silently keeping `"myprov` as the key
+    would be the same class of defect this whole block exists to prevent."""
+    text = VALID_PROVIDER_YAML.replace("key: testp", 'key: "testp')
+    (tmp_path / "testp.yaml").write_text(text, encoding="utf-8")
+    with pytest.raises(RuntimeError, match="unterminated quote"):
+        load_providers(tmp_path)
+
+
+def test_the_documented_template_is_the_shape_this_test_pins(tmp_path):
+    """If README stops showing inline comments the tests above still pass, but
+    they would no longer be pinning the documented path. Read the real file."""
+    readme = (providers.PROVIDERS_DIR / "README.md").read_text(encoding="utf-8")
+    documented = [line for line in readme.splitlines()
+                  if line.startswith(("key:", "context_tokens:"))]
+    assert documented, "README no longer documents the required fields"
+    assert all("#" in line for line in documented), (
+        "README example no longer uses inline comments; "
+        "re-check what shape the fallback must tolerate")
+
+
+def test_a_bom_saved_provider_file_loads_with_either_parser(tmp_path, monkeypatch):
+    """pyyaml strips a leading BOM; the fallback did not, so the first key became
+    "\ufeffkey" and the file failed as "missing fields: key"."""
+    path = tmp_path / "bomprov.yaml"
+    path.write_bytes(b"\xef\xbb\xbf" + VALID_PROVIDER_YAML.encode("utf-8"))
+    assert "testp" in load_providers(tmp_path)
+    monkeypatch.setattr(providers, "yaml", None)
+    assert "testp" in load_providers(tmp_path)

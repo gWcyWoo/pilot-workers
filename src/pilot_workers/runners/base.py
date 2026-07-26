@@ -27,6 +27,13 @@ from pathlib import Path
 from typing import Any, Literal
 
 
+# A `--version` probe answers in milliseconds when the runtime is healthy. It
+# runs on the dispatch path, ahead of the point where run_process arms
+# --timeout/--idle-timeout, so an unbounded one hangs a whole dispatch with no
+# output. Generous enough that a cold, slow machine never trips it.
+VERSION_PROBE_TIMEOUT_S = 30
+
+
 @dataclass(frozen=True)
 class TokenUsage:
     input: int = 0
@@ -121,4 +128,65 @@ class Runner(ABC):
     def binary_path(self) -> Path | None:
         """Best-effort binary location WITHOUT verification (for dry-run display).
         Default: None (unknown until resolve_binary)."""
+        return None
+
+    # ------------------------------------------------------------------
+    # Runtime installation and sandbox layout
+    #
+    # These four existed only as OpenCode literals scattered through the
+    # neutral layer: the sandbox credential path was spelled
+    # `data/opencode/auth.json` inside `runtime.provision_run_sandbox`, and
+    # `install runner <name>` / `uninstall runner <name>` ignored their own
+    # `name` argument and operated on OpenCode's directory whatever it said.
+    # A second runner could not have been added without editing both files.
+    # ------------------------------------------------------------------
+
+    def sandbox_credential_path(self, paths: dict[str, Path]) -> Path:
+        """Where inside a per-run sandbox this runner reads its credential.
+
+        Given ``providers.run_paths(...)``. The neutral layer creates the
+        parent directory and the symlink to the canonical credential; only the
+        location is the runner's business. Default: the canonical path's name
+        directly under the sandbox's data dir.
+        """
+        return paths["data"] / "credentials.json"
+
+    def runtime_root(self) -> Path | None:
+        """Directory holding this runner's installed runtime, if it has one.
+
+        Used by `install runner` / `uninstall runner` and by the
+        post-uninstall report. Default: None (nothing to install).
+        """
+        return None
+
+    @property
+    def pinned_version(self) -> str | None:
+        """The exact runtime version this runner requires, if it pins one."""
+        return None
+
+    def probe_version(self, binary: Path) -> str | None:
+        """This runner's installed version, or None if it cannot be determined.
+
+        Default: run ``<binary> --version``. A runner that can cache the answer
+        (the probe costs a Node startup for OpenCode) overrides this.
+
+        Bounded, and with no stdin: a runtime that never answers must report
+        "unknown", not block its caller.
+        """
+        import subprocess
+
+        try:
+            proc = subprocess.run(
+                [str(binary), "--version"], text=True, capture_output=True,
+                check=False, stdin=subprocess.DEVNULL,
+                timeout=VERSION_PROBE_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            return None
+        return (proc.stdout or proc.stderr).strip() or None
+
+    def install_script(self) -> Path | None:
+        """A script that installs this runner's runtime, if that is how it is
+        installed. Default: None — `install runner <name>` then reports that
+        this runner needs no runtime."""
         return None

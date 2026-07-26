@@ -215,6 +215,49 @@ def test_classify_verdict_unavailable_short_text_no_errors_is_empty():
 # ---------------------------------------------------------------------------
 
 
+def _verdict_for(final_text, summary, stderr_text=""):
+    return dispatch_mod.build_verdict(
+        run_id="run-e", provider="glm", runner="opencode", mode="explore",
+        parsed=_sample_parsed(final_text=final_text), summary=summary,
+        jsonl_path="/tmp/run-e.jsonl", stderr_path="/tmp/run-e.stderr.log",
+        step_cap=10, report_path="/tmp/run-e.report.md",
+        child_stderr_text=stderr_text,
+    )
+
+
+def test_an_error_verdict_carries_the_child_stderr_tail():
+    """The two verdicts that most need diagnosing carried the least.
+
+    fanout's synthesized verdicts already embedded a stderr tail; a real error
+    verdict named two file paths instead, so the planner had to open them —
+    the round trip the two-line contract exists to avoid.
+    """
+    verdict = _verdict_for("short", {"exit_code": 1},
+                           stderr_text="Traceback: boom at line 3\n")
+    assert verdict["verdict"] == "error"
+    assert "boom at line 3" in verdict["stderr_tail"]
+
+
+def test_an_empty_verdict_carries_the_child_stderr_tail():
+    verdict = _verdict_for("", {"exit_code": 0},
+                           stderr_text="model returned nothing\n")
+    assert verdict["verdict"] == "empty"
+    assert "model returned nothing" in verdict["stderr_tail"]
+
+
+def test_the_stderr_tail_is_bounded():
+    verdict = _verdict_for("short", {"exit_code": 1}, stderr_text="x" * 5000)
+    assert len(verdict["stderr_tail"]) == dispatch_mod.STDERR_TAIL_BYTES
+
+
+def test_a_completed_verdict_does_not_carry_a_stderr_tail():
+    """Heartbeat chatter on a healthy run is not worth a byte of context."""
+    verdict = _verdict_for(_explore_text_with_block(), {"exit_code": 0},
+                           stderr_text="heartbeat ...\n")
+    assert verdict["verdict"] == "completed"
+    assert verdict["stderr_tail"] == ""
+
+
 def test_build_verdict_shape():
     final_text = _explore_text_with_block()
     parsed = _sample_parsed(final_text=final_text, steps=2)
@@ -263,7 +306,7 @@ def test_build_verdict_without_block_is_unavailable():
     assert verdict["final_text_len"] == len("plain report without block")
 
 
-def test_build_verdict_invalid_block_is_unstructured():
+def test_build_verdict_invalid_block_is_malformed():
     final_text = (
         "prose\n<!--PILOT_RESULT_BEGIN-->\n{not json\n"
         "<!--PILOT_RESULT_END-->\n" + "y" * 200
@@ -281,7 +324,9 @@ def test_build_verdict_invalid_block_is_unstructured():
         step_cap=10,
         report_path="/tmp/run-3.report.md",
     )
-    assert verdict["parse_state"] == "unstructured"
+    # `malformed`, not `unstructured`: the block was there and finished, so the
+    # planner should open final_text_path rather than assume nothing was written.
+    assert verdict["parse_state"] == "malformed"
     assert verdict["result"] is None
     assert "final_text" not in verdict
 
@@ -459,7 +504,7 @@ def test_main_resume_without_run_id_returns_2(tmp_path, monkeypatch, capsys):
 
 def test_build_runner_command_resume_includes_run_id():
     cmd = dispatch_mod._build_runner_command(
-        "glm", "resume", "/tmp", "task text", None, "s-1", False, 60, 30,
+        "glm", "resume", "/tmp", None, "/tmp/t.md", "s-1", False, 60, 30,
         run_id="r-1",
     )
     assert "--run-id" in cmd
@@ -469,6 +514,116 @@ def test_build_runner_command_resume_includes_run_id():
 
 def test_build_runner_command_cold_mode_omits_run_id():
     cmd = dispatch_mod._build_runner_command(
-        "glm", "code", "/tmp", "task text", None, None, False, 60, 30,
+        "glm", "code", "/tmp", None, "/tmp/t.md", None, False, 60, 30,
     )
     assert "--run-id" not in cmd
+
+
+def test_the_stderr_tail_redacts_every_configured_key(monkeypatch):
+    """run_process redacts only the key it was handed.
+
+    A worker's stderr can mention a DIFFERENT configured provider's key; that
+    was contained while the text stayed in a local 0600 log, but the tail goes
+    into the verdict, which goes to the planner.
+    """
+    from pilot_workers import runtime
+
+    other_key = "fake-key-for-another-provider-000111"
+    monkeypatch.setattr(runtime, "configured_secrets", lambda: [other_key])
+
+    verdict = _verdict_for(
+        "short", {"exit_code": 1},
+        stderr_text=f"provider rejected {other_key} while probing\n")
+
+    assert other_key not in verdict["stderr_tail"]
+    assert "[REDACTED]" in verdict["stderr_tail"]
+    assert "while probing" in verdict["stderr_tail"], "redaction ate the message"
+
+
+def test_redaction_ignores_short_values(monkeypatch):
+    """A 3-char 'secret' occurs in ordinary output; replacing it would corrupt
+    the very text the tail exists to convey."""
+    from pilot_workers import runtime
+
+    assert runtime.redact_secrets("the cat sat", ["cat"]) == "the cat sat"
+
+
+# ---------------------------------------------------------------------------
+# A wrapper that died after `started` reports no summary — its exit code is the
+# only evidence left, and discarding it turned a kill into "completed".
+# ---------------------------------------------------------------------------
+
+
+def test_no_summary_with_a_nonzero_child_exit_is_an_error():
+    parsed = _sample_parsed(final_text=LONG_TEXT)
+    assert dispatch_mod.classify_verdict(
+        parsed, 10, None, "unavailable", 1) == "error"
+
+
+def test_no_summary_with_a_signal_death_is_an_error():
+    """POSIX reports a signal kill as a negative return code (SIGKILL -> -9)."""
+    parsed = _sample_parsed(final_text=LONG_TEXT)
+    assert dispatch_mod.classify_verdict(
+        parsed, 10, None, "unavailable", -9) == "error"
+
+
+def test_no_summary_with_a_clean_child_exit_keeps_the_old_reading():
+    """A zero exit with long text really is a completion; only failure changes."""
+    parsed = _sample_parsed(final_text=LONG_TEXT)
+    assert dispatch_mod.classify_verdict(
+        parsed, 10, None, "unavailable", 0) == "completed"
+
+
+def test_a_parsed_result_still_wins_over_a_nonzero_child_exit():
+    """Rule order is unchanged: a valid result block is a completion."""
+    parsed = _sample_parsed(final_text=_explore_text_with_block())
+    assert dispatch_mod.classify_verdict(parsed, 10, None, "parsed", 1) == "completed"
+
+
+def test_the_verdict_reports_the_child_exit_code_when_there_is_no_summary():
+    """`exit_code: null` told the planner "it failed and we do not know why"
+    while the number was in hand."""
+    verdict = dispatch_mod.build_verdict(
+        run_id="run-k", provider="glm", runner="opencode", mode="explore",
+        parsed=_sample_parsed(final_text=LONG_TEXT), summary=None,
+        jsonl_path="/tmp/run-k.jsonl", stderr_path=None, step_cap=10,
+        report_path="/tmp/run-k.report.md", child_exit_code=-9,
+    )
+    assert verdict["exit_code"] == -9
+    assert verdict["verdict"] == "error"
+
+
+def test_redaction_at_exactly_the_minimum_length():
+    """Boundary for `>= MIN_REDACTABLE_SECRET`: a 12-char secret IS redacted."""
+    from pilot_workers import runtime
+
+    secret = "a" * runtime.MIN_REDACTABLE_SECRET
+    assert secret not in runtime.redact_secrets(f"saw {secret} here", [secret])
+    shorter = "a" * (runtime.MIN_REDACTABLE_SECRET - 1)
+    assert shorter in runtime.redact_secrets(f"saw {shorter} here", [shorter])
+
+
+def test_no_summary_error_event_at_the_empty_text_threshold():
+    """The `summary is None` + error-event branch was only tested at 5 and 250
+    characters, so the threshold comparison could flip unnoticed."""
+    at = _sample_parsed(
+        final_text="x" * dispatch_mod.EMPTY_FINAL_TEXT_THRESHOLD, has_error_event=True)
+    below = _sample_parsed(
+        final_text="x" * (dispatch_mod.EMPTY_FINAL_TEXT_THRESHOLD - 1),
+        has_error_event=True)
+    assert dispatch_mod.classify_verdict(at, 999, None, "unavailable") == "completed"
+    assert dispatch_mod.classify_verdict(below, 999, None, "unavailable") == "error"
+
+
+def test_run_id_outside_resume_is_refused_not_dropped(tmp_path, monkeypatch, capsys):
+    """`_build_runner_command` forwards --run-id only for resume, and run.py
+    rejects it for every other mode, so a planner passing it to a cold dispatch
+    got neither the sandbox it named nor a word about it. Pre-existing: the line
+    is at HEAD. Same class as the swallowed --global-key."""
+    task = tmp_path / "t.md"
+    task.write_text("do a thing", encoding="utf-8")
+    rc = dispatch_mod.main([
+        "--provider", "glm", "--mode", "review", "--workdir", str(tmp_path),
+        "--task-file", str(task), "--run-id", "20260101T000000Z-abcdef01"])
+    assert rc != 0
+    assert "--run-id is only valid with --mode resume" in capsys.readouterr().err

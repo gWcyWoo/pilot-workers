@@ -36,10 +36,11 @@ OpenCode 1.18.4 ──→ GLM / Kimi / DeepSeek (official APIs)
 | `pilot-workers run` | Streaming entry: `started` → engine events → `summary`. Humans `tail -f latest.log` against this. |
 | `pilot-workers template <mode>` | Prints a structured task template (code/explore/test/review). |
 | `pilot-workers fanout` | Dispatches several jobs concurrently; stdout = one JSON array of verdicts. Hardened: `start_new_session` + SIGINT/SIGTERM `killpg` + per-job watchdog; exit 0 requires every verdict in `("completed","step_capped_partial")` AND `timed_out == idle_timed_out == interrupted == false` for all jobs. |
-| `pilot-workers install <host\|all>` | Deploys the host playbook skill (`integrations/<host>-host/skills/pilot-workers/`); manifest v3 (host-level; first v3 install auto-migrates v1/v2, purging legacy per-provider files). |
+| `pilot-workers install <provider> on <host> [for <mode>] [--global-key]` | Records the routing decision in the manifest (v4, host-level: `providers` + `modes`) and regenerates that host's deployed skill from it. `--global-key` prompts for the provider's API key in the same step (atomic write, 0600). |
+| `pilot-workers install <host\|all>` | Idempotent sync of the host playbook skill (`integrations/<host>-host/skills/pilot-workers/`); deploys nothing when the host has no provider configured, and never deletes an existing deployment. Auto-migrates manifest v1/v2/v3, purging legacy per-provider files. |
 | `pilot-workers install runner <name>` | Installs a worker runtime (e.g. OpenCode via npm). |
-| `pilot-workers status [--json]`, `status <host>` | Credential, host-level install, and runner status overview. Surfaces provider `strengths`/`suitable_modes`/`notes`. |
-| `pilot-workers credentials <key>` | Interactive credential setup (atomic write, 0600). |
+| `pilot-workers uninstall (<provider> on <host>\|for <mode> on <host>\|key <provider>\|<host\|all>\|runner <name>)` | Removes a worker from a host, a mode assignment, a stored API key, or a whole host. Removing a host's last provider deletes its skill. |
+| `pilot-workers status [--json]`, `status <host>` | Credential, per-host worker configuration (plus manifest-vs-disk divergence), and runner status overview. Surfaces provider `strengths`/`suitable_modes`/`notes`. |
 | `pilot-workers maintain (logs\|runs\|worktrees)` | Log cleanup, run-sandbox reaper (`runs --older-than-days N [--keep M]`), and worktree lifecycle. |
 
 ### 2. Runner adapter layer (`runners/`)
@@ -47,7 +48,7 @@ OpenCode 1.18.4 ──→ GLM / Kimi / DeepSeek (official APIs)
 `base.py` defines the contract:
 
 - **`UnifiedEvent`** (kind: step/text/reasoning/tool/error/session) — the only event type the upper layers consume.
-- **`Runner` ABC** — 11 methods covering config generation, command assembly, environment injection, task formatting, event translation, binary resolution, and credential management.
+- **`Runner` ABC** — config generation, command assembly, environment injection, task formatting, event translation, binary resolution, credential management, plus the runtime seams (`runtime_root`, `pinned_version`, `install_script`, `probe_version`, `sandbox_credential_path`) that keep `install runner` / `uninstall runner` / `status` and the per-run sandbox from spelling one engine's paths.
 
 `opencode_runner.py` is the OpenCode implementation. It owns all OpenCode-specific knowledge: config schema (`$schema: opencode.ai/config.json`), `OPENCODE_*` env vars, CLI flags (`--pure run --format json --thinking`), event format (step_finish/text/tool_use/error with part.tokens.cache), permission-denied detection (`"rule which prevents"`), auth.json format, and the pinned binary version.
 
@@ -89,7 +90,7 @@ This is profile and process isolation, not an OS sandbox. For untrusted reposito
 - Loads all `data/providers/*.yaml` at import time.
 - 7 required fields: `key`, `provider_id`, `model_id`, `base_url`, `display_name`, `context_tokens`, `output_tokens`.
 - Optional: `runner` (default `opencode`), `permissions` (profile name), `asset_prefix` (default = key), and the v0.5.0 metadata fields `strengths` / `suitable_modes` / `notes` (free-form strings surfaced by `pilot-workers status`).
-- Reserved keys: `runner`, `all`, `on`, `claude`, `codex`.
+- Reserved keys: `all`, `claude`, `codex`, `for`, `key`, `on`, `runner`.
 - `pilot_home()` resolution: `$PILOT_WORKERS_HOME` → `$CODEX_HOME` → `~/.codex`.
 
 ## Data flow
@@ -99,21 +100,21 @@ This is profile and process isolation, not an OS sandbox. For untrusted reposito
 3. `run` resolves the provider's runner, builds engine config, creates an isolated env, and spawns the engine binary.
 4. Task text is delivered via stdin (XML-wrapped for OpenCode).
 5. Engine events stream through: raw lines are logged to JSONL on disk, translated to `UnifiedEvent`s for rendering (`latest.log`) and session ID extraction.
-6. On engine exit, `dispatch` parses the JSONL via the runner adapter, extracts the structured result block from the worker's final text (per-mode schema; `parse_state` = `parsed` / `unstructured` / `unavailable`), classifies the verdict (`completed` / `step_capped_partial` / `empty` / `error`), writes `report.md` + `verdict.json` atomically (0600), and prints the verdict to stdout. Sibling flags `timed_out` / `idle_timed_out` / `interrupted` are independent of the verdict string and MUST be checked even on `completed`.
+6. On engine exit, `dispatch` parses the JSONL via the runner adapter, extracts the structured result block from the worker's final text (per-mode schema; `parse_state` = `parsed` / `malformed` / `unstructured` / `unavailable`, and a non-`parsed` state carries `parse_error` naming the shape that arrived), classifies the verdict (`completed` / `step_capped_partial` / `empty` / `error`), writes `report.md` + `verdict.json` atomically (0600), and prints the verdict to stdout. Sibling flags `timed_out` / `idle_timed_out` / `interrupted` are independent of the verdict string and MUST be checked even on `completed`.
 7. Planner reads the two-line stdout (`started` + `verdict`) and acts on the verdict (consuming `verdict.result` first; `final_text_path` at most once, only when `parse_state != "parsed"` or a finding needs surrounding context).
 
 ## Structured verdict (schema v2)
 
-The stdout `verdict` line and the on-disk `<run_id>.verdict.json` carry `schema_version: 2`:
+The stdout `verdict` line and the on-disk `<stem>.verdict.json` carry `schema_version: 2`. The stem is the run id for a cold run and `<sandbox_id>+<attempt_id>` for a resumed attempt — a resume mints a fresh run id for its own files because `open_private_text` is `O_CREAT|O_EXCL`, while its lock stays in the original sandbox, and the lifecycle tools recover the sandbox by splitting the stem on `+`:
 
-- `parse_state`: `parsed` | `unstructured` | `unavailable` — whether the final text held a valid per-mode result block.
+- `parse_state`: `parsed` | `malformed` | `unstructured` | `unavailable` — whether the final text held a valid per-mode result block. A non-`parsed` state sets `parse_error` to the shape that arrived (top-level keys, first entry keys), because a state with no reason attached is one nobody acts on.
 - `result`: the per-mode schema dict, or `null`:
   - `explore`: `{facts: [{fact, file_line}], truncated: bool, more_in: [dirs]}`
   - `code`: `{status, files_changed: [], validation: {commands: [{cmd, exit_code, output_summary}], passed: bool}, remaining_risks}`
   - `test`: `{command, passed: int, failed: int, failures: [{test, error}]}` (`error` capped at 40 lines)
   - `review`: `{overall, severity_counts: {high, medium, low}, findings: [{severity, file_line, summary, impact, suggested_fix}]}`
   - `resume`: reuses the `code` schema.
-- `final_text_path`: path to `<run_id>.report.md` (verbatim last text event, or the `no model output` sentinel). `final_text` is gone from the verdict.
+- `final_text_path`: path to `<stem>.report.md` (verbatim last text event, or the `no model output` sentinel). `final_text` is gone from the verdict.
 - Sibling flags `timed_out` / `idle_timed_out` / `interrupted` are set independently; the authoritative empty signal is `parse_state == "unavailable"`, never report content.
 
 Extraction is deterministic (no LLM): find the LAST `<!--PILOT_RESULT_BEGIN-->...<!--PILOT_RESULT_END-->` block in the final text, validate against the per-mode schema. The block is injected by `prompts/*.md`. `dispatch --reparse <jsonl> --mode <mode>` recomputes a verdict from an existing JSONL and also writes `report.md` (idempotent).
@@ -131,24 +132,27 @@ Classification order (frozen, full-matrix tested): (1) `steps >= cap` → `step_
 - Single-writer rule: only `_run_job` writes `results[index]`; killers write `reasons[index]` only. Reason precedence: a real child verdict line wins verbatim; a synthesized verdict is emitted only when no verdict line was captured (the recorded reason is logged to stderr regardless).
 - Exit code 0 requires every verdict in `("completed", "step_capped_partial")` AND `timed_out == idle_timed_out == interrupted == false` for all jobs. `--max-parallel` is validated ≥ 1.
 
-## Install manifest (schema v3)
+## Install manifest (schema v4)
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "installs": {
     "claude": {
       "installed_at": "...", "package_version": "...",
-      "files": [...], "created_dirs": [...]
+      "files": [...], "created_dirs": [...],
+      "providers": ["glm"],
+      "modes": {"code": "glm"}
     },
     "codex": {...}
   }
 }
 ```
 
-- Host-level tracking (one entry per host; the provider dimension is gone). Atomic write after each host (`os.replace` so no v1/v2 file survives to be re-migrated).
-- v1 (`hosts` key) and v2 (per-provider nesting) manifests are migrated on first v3 install: the v1 `__all__` entry is purged FIRST via `_purge_entry`, then every v2 provider entry, printing one `removed:` line per purged file.
-- `uninstall` removes files + empty `created_dirs` (deepest first). Missing files are skipped silently.
+- Host-level tracking (one entry per host; the provider dimension is gone). Each entry also carries `providers` (which workers this host may see) and `modes` (mode -> provider), which is what the deployed skill is generated from.
+- Written ONCE per transaction, under an flock (`manifest_transaction`): `install all` collects every host's entry inside a single transaction, so a crash records no hosts rather than some. Re-running the command is idempotent and repairs it.
+- v1 (`hosts` key) and v2 (per-provider nesting) manifests are migrated in memory on the first v4 install: the v1 `__all__` entry is purged FIRST via `_purge_entry`, then every v2 provider entry, printing one `removed:` line per purged file.
+- `uninstall` removes files + empty `created_dirs` (deepest first). Missing files are skipped silently. An emptied manifest is deleted only by uninstall, never by install.
 
 ## Built-in providers
 
@@ -180,7 +184,7 @@ The skill is a playbook, not CLI syntax docs: it carries the dispatch doctrine (
 
 ## Testing
 
-297 pytest tests, all offline:
-- No network calls, no real `~/.claude` or `~/.codex` access.
+The pytest suite is offline end to end:
+- No network calls, no real `~/.claude` or `~/.codex` access. `tests/conftest.py` redirects `HOME`/`CODEX_HOME`/`Path.home()` for every test; `tests/test_isolation_guard.py` fails loudly if that stops working.
 - Install tests use `PILOT_WORKERS_HOME` + `--target` pointing to `tmp_path`.
-- Covers: provider loading, policy matrices, runner adapter translation, render equivalence, dispatch verdict classification + per-mode result schemas, manifest v3 migration (v1/v2 purge ordering, `os.replace`), install/uninstall lifecycle, status command, CLI routing, credential handling, runtime isolation, per-run sandbox provisioning + lock staleness, fanout watchdog/signal/reason-precedence.
+- Covers: provider loading, policy matrices, runner adapter translation, render equivalence, dispatch verdict classification + per-mode result schemas, manifest v4 migration (v1/v2/v3 purge ordering, `os.replace`) and its flock transaction, install/uninstall lifecycle, generated-skill splicing, task guards (credential shapes + unfilled placeholders), child-environment hygiene, status command, CLI routing, credential handling, runtime isolation, per-run sandbox provisioning + lock takeover, maintain reaper liveness, fanout watchdog/signal/reason-precedence.

@@ -1,6 +1,6 @@
 ---
 name: pilot-workers
-description: Plan with Codex, then run bounded tasks (code, explore, test, review, resume) through isolated LLM workers via the pilot-workers CLI and verify their structured verdicts. Invoke explicitly as `$pilot-workers [code|explore|test|review|resume] [task]`. Use whenever the user asks to delegate coding, investigation, testing, review, or session continuation to a worker model — glm, kimi/kimi-k3/k3, deepseek/ds. Not for small tweaks, mid-course judgment calls, or credentials/CI/production changes.
+description: Plan with Codex, then run bounded tasks (code, explore, test, review, resume) through isolated LLM workers via the pilot-workers CLI and verify their structured verdicts. Invoke explicitly as `$pilot-workers [code|explore|test|review|resume] [task]`. Use whenever the user asks to delegate coding, investigation, testing, review, or session continuation to a worker model — {{PILOT_PROVIDER_TRIGGERS}}. Not for small tweaks, mid-course judgment calls, or credentials/CI/production changes.
 ---
 
 # pilot-workers Playbook
@@ -13,10 +13,30 @@ separate OpenCode processes that **cannot see this conversation**.
 
 ## Quick Reference
 
+0. **Choose `<key>` first.** Delegation happens for exactly two reasons: the
+   user names a provider (that always wins), or the **Workers table** at the
+   bottom of this file assigns one to your mode — it was generated for this host,
+   so an exploration request needs no question asked. **A mode with no provider
+   assigned is not an invitation to guess: do it yourself.** No assignment means
+   the user never delegated that kind of work; picking a worker by its advertised
+   strengths would delegate something they chose to keep. If a mode looks worth
+   delegating, say so and let them run
+   `pilot-workers install <provider> on <host> for <mode>`. Never dispatch to a
+   provider absent from the table: it was not configured for this host.
 1. `pilot-workers template <mode> > /tmp/<provider>-<mode>-<slug>-<timestamp>.md`,
    then fill in the template (unique filename — parallel sessions must not
    collide). The task file must be **self-contained** and carry **never any
-   credentials**. No template for `resume` — pass
+   credentials** — it is sent verbatim to a third-party endpoint. Dispatch
+   refuses obvious key shapes and any key configured on this machine, but that
+   check **cannot catch every secret**: it is a backstop, not permission to paste
+   config. Reference a value by env var and let the worker read it.
+   **The worker can also see the whole workdir.** Opening an `auth.json` or
+   `.env` is denied for both the shell and the read tool, but a path deny cannot
+   stop a recursive content search from returning a line out of one. If the
+   project holds live secrets in untracked files, dispatch with `--worktree`: a
+   detached worktree materialises tracked files only, so a gitignored `.env` is
+   not there at all — a boundary rather than a pattern.
+   No template for `resume` — pass
    `--task "<what remains, how to fix>"` instead.
 2. Run in a background shell **from the main session**:
    `pilot-workers dispatch --provider <key> --mode <mode> --workdir <absolute-project-path> --task-file <file>`.
@@ -30,12 +50,12 @@ separate OpenCode processes that **cannot see this conversation**.
    (missing credentials, runner not installed) produce no JSON.
 4. Consumption contract: read `verdict.result` first (the parsed
    PILOT_RESULT block). Read `final_text_path` at most once, only when
-   `parse_state != "parsed"` or a finding needs surrounding context. Never
+   `parse_state != "parsed"` or a finding requires surrounding context. Never
    auto-redispatch on parse failure alone.
 5. Resume-first recovery: on failure or non-convergence, resume with
-   `--session <session_id>` + `--run-id <run_id>` from the original verdict
+   `--session <session_id>` + `--run-id <resume_run_id>` from the original verdict
    before considering a cold redispatch. Missing credentials →
-   `pilot-workers credentials <key>`.
+   `pilot-workers install <key> on <host> --global-key`.
 
 ## Verdict matrix
 
@@ -48,9 +68,17 @@ report both facts).
 - `step_capped_partial` → step cap hit; partial coverage. A parsed partial
   block is still salvaged into `result` — report the uncovered scope
   truthfully.
-- `error` / `empty` → read `jsonl_path` for the post-mortem before concluding
-  anything; report the cause of death truthfully. Never draw a conclusion
+- `error` / `empty` → read `stderr_tail` first, then `jsonl_path` if it does not
+  explain the death; report the cause truthfully. Never draw a conclusion
   without reading the evidence.
+- `duration_s` / `tokens` / `final_text_len` inform your next decision, not the
+  report: cost so far, and whether `final_text_path` is worth opening at all
+  (`parse_state: parsed` means `result` already has everything).
+
+`parse_state` values: `parsed` (consume `result`), `malformed` (the worker DID
+write a result block and it did not parse — the work is real, read
+`final_text_path`), `unstructured` (a block that was cut off mid-write — treat as
+partial), `unavailable` (no block at all — the worker ignored the contract).
 - Synthesized fanout verdicts (`synthesized: true`) carry `reason`
   (`crash|timeout|idle_timeout|interrupted`) + `stderr_tail`; `result` and
   `final_text_path` are null. Consume rule: read `reason` + `stderr_tail`
@@ -63,10 +91,13 @@ exploration is a top dispatch candidate. Write the question straight into the
 task file; do not read the code yourself first — that wastes the saving. List
 what to investigate item by item; pin the scope to directories/file types.
 
-- **Spot-check — do not parrot**: verify 2-3 of the most critical conclusions
-  at their cited `file:line`. They line up → trust the report; they don't →
-  rewrite and redispatch, or flag which conclusions are unverified.
-  Conclusions without a `file:line` are untrusted outright.
+- **Planning is the verification — do not sample.** Sampling a couple of
+  conclusions proves nothing about the rest and manufactures confidence in it.
+  Take the report into planning and let the gaps surface: a broad gap goes back
+  as a rewritten explore dispatch, while three or five lines you still need —
+  read them here, a round-trip costs more than the read.
+- Conclusions carrying no `file:line` are untrusted: you cannot plan on them and
+  cannot check them, so treat them as absent.
 - Bring conclusions back **with their file:line references, verbatim** —
   losing the references ruins the main thread's planning.
 - Judgment/trade-off questions and file changes are your job; split mixed
@@ -86,13 +117,23 @@ what to investigate item by item; pin the scope to directories/file types.
   git worktree; one worker per background shell; batch similar durations per
   fanout and split mixed durations. Clean up with
   `pilot-workers maintain worktrees remove <path>`.
-- Gather intelligence, not deep verification (verified once, by you):
-  `git diff --stat` for the change list, check for files outside the spec's
-  boundaries, read `exit_code` / `session_id` / `steps` / `tool_errors`.
-  Then run the single verification pass yourself: diff against the spec
-  whitelist, spot-check the actual diff, run tests/lint. Never treat the
-  worker's completion claim as proof.
-- **Cross-model review for rewrite-scale diffs** (hundreds of lines or more):
+- Verify once, and verify what is cheap to verify COMPLETELY. `git diff --stat`
+  plus `git status --short` settle one whole property cheaply: which files
+  changed. Compare that set against the spec's whitelist — anything outside it
+  is a boundary violation, and a stray untracked file is worth catching too.
+  Reconcile the worker's own `FILES_CHANGED` against that set too — a
+  mismatch means it misreported its work, which colours everything else it
+  claimed. Also read `exit_code` / `session_id` / `steps` / `tool_errors`.
+- **Do not sample the diff.** A few hunks of a large change license nothing
+  about the rest. Correctness comes from the test run, from exercising the
+  behaviour end to end, and — for rewrite-scale diffs — from the cross-model
+  review below. Never treat the worker's completion claim as proof.
+  **The test run goes to whichever provider is assigned to `test` in the Workers
+  table**, as a `test`-mode dispatch; running it here would void that
+  assignment. You still read the counts and failures and decide what they mean.
+  Exception: a suite finishing in seconds with short output is cheaper to run
+  here than to round-trip.
+- **Cross-model review for rewrite-scale diffs** (several hundred lines or more):
   dispatch a *different* provider in review mode before verifying — the two
   models' errors are uncorrelated, so the second catches the first's
   systematic blind spots at cheap quota. Skip for small changes.
@@ -103,8 +144,8 @@ what to investigate item by item; pin the scope to directories/file types.
 
 - **Worth-it self-check — push back on fast suites.** Suite under 1 minute,
   or short expected failure output → run it yourself. Dispatch pays off for
-  huge output (hundreds/thousands of failure lines), repeated reruns, or a
-  near-full context.
+  huge output (a few hundred to several thousand failure lines), repeated
+  reruns, or a near-full context.
 - The task states the exact test command, directory, preconditions, and known
   pre-existing failures. Run-and-gather only; fixes are your job.
 - **Anti-false-positive**: counts + raw error text → trust it. "All passed"
@@ -123,17 +164,26 @@ what to investigate item by item; pin the scope to directories/file types.
 - **Parallel fanout recipe**: one job per axis, launched together —
 
   ```bash
-  pilot-workers fanout --job glm:review:/tmp/glm-review-correctness-<ts>.md \
-                       --job kimi-k3:review:/tmp/kimi-review-security-<ts>.md
+  pilot-workers fanout --job <providerA>:review:/tmp/review-correctness-<ts>.md \
+                       --job <providerB>:review:/tmp/review-security-<ts>.md
   ```
 
-  (`--job PROVIDER:MODE:TASK_FILE`; mixing providers spreads load across
+  (`--job PROVIDER:MODE:TASK_FILE`; mixing providers distributes load across
   quotas.) Each job collects its verdict independently.
 - **Aggregation is your job.** Merge and dedupe across axes, sort by
-  severity, report directly. Spot-check 1-2 high-severity findings at their
-  cited `file:line` — false positives are the most common review defect; flag
-  failures as "verified false positive". Findings without a `file:line` are
-  untrusted.
+  severity, report directly. **Verify every finding you intend to act on,
+  before acting** — not a sample of them. A review finding is a claim you will
+  answer by editing code, so a false positive turns into a wrong edit; open its
+  cited `file:line` and confirm the defect is real. Findings you are NOT acting
+  on need no verification: say they are unverified. Findings with no `file:line`
+  are untrusted.
+- **Try to REFUTE each high before acting on it, and refute its fix too.**
+  Reviewers cannot run code (interpreters are denied in review mode), so their
+  findings are readings — plausible and sometimes wrong. Run the thing: the input
+  against the regex, the race with the lock disabled, the command in a scratch
+  copy. A proposed fix is a separate claim and has been wrong even when the
+  diagnosis was right. For a high you cannot settle by running something,
+  dispatch a *different* provider in review mode to argue against it.
 - Review mode cannot edit; small fixes yourself, bulk mechanical fixes via a
   code dispatch. Axis too broad → split first; unclear diff baseline →
   clarify the two versions first.
@@ -145,11 +195,14 @@ what to investigate item by item; pin the scope to directories/file types.
 
   ```bash
   pilot-workers dispatch --provider <key> --mode resume \
-      --session <session_id from the verdict> --run-id <run_id from the verdict> \
+      --session <session_id from the verdict> --run-id <resume_run_id from the verdict> \
       --workdir <workdir from started> --task "Previous task incomplete: <what is missing, how to fix>"
   ```
 
-  Take `--session` and `--run-id` from the original verdict; no template —
+  Take `--session` from the verdict and `--run-id` from its **`resume_run_id`**,
+  not its `run_id`: a resumed run gets a fresh `run_id` for its own log, so
+  resuming twice off `run_id` names a sandbox that never existed and fails as
+  "session expired". For a cold run the two are equal. No template —
   pass `--task` with what remains and how to fix it.
 - **Two obstacles, then take over**: same obstacle twice and still not
   passing → Codex takes over and wraps up.
@@ -157,24 +210,19 @@ what to investigate item by item; pin the scope to directories/file types.
   past retention" error means the sandbox was reaped — redispatch cold. A
   loud "run is still active" error means a live lock; do not force it.
 
+<!--PILOT_GENERATED_BEGIN-->
+<!--PILOT_GENERATED_END-->
+
 ## Providers
 
-Minimal static table, **as of v0.5.0 — verify with `pilot-workers status`
-when uncertain** (status shows each provider's `strengths`,
-`suitable_modes`, and `notes` live from the YAML registry):
+Provider strengths and suitable modes live in the provider YAML registry,
+not here — run `pilot-workers status <host>` when you need them (status
+renders each provider's `strengths`, `suitable_modes`, and `notes` live).
 
-| key | strengths | suitable modes |
-|---|---|---|
-| `glm` | fast mechanical execution, cheap bulk edits and scaffolding | code, review |
-| `kimi-k3` | large context, contract-grade precision | code, review, explore |
-| `ds` | cheap high-volume reading; exploration and test harvesting | explore, test, review |
-
-Cross-model review: never review a provider's rewrite-scale diff with the
-same provider — errors would be correlated.
 
 ## Timeouts
 
-- `--timeout <seconds>` bounds the whole job; the fanout parent watchdog
+- `--timeout <sec>` caps the whole job; the fanout parent watchdog
   enforces it plus a grace period.
 - **`--timeout 0` forfeits the parent watchdog** for that job (no deadline,
   no silence kill); the child's `--idle-timeout` remains the only liveness

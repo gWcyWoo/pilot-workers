@@ -11,12 +11,18 @@ from pathlib import Path
 import secrets
 import sys
 
-from pilot_workers import fmt_events, policy, providers, runtime
+from pilot_workers import fmt_events, policy, providers, runtime, taskguard
 from pilot_workers.runners import get_runner
 
 
 DEFAULT_TIMEOUT_S = 3600
 DEFAULT_IDLE_TIMEOUT_S = 900
+
+
+
+# Reading every configured key belongs to the layer that owns credential IO;
+# `dispatch` needs the same list to redact what it puts in a verdict.
+_configured_secrets = runtime.configured_secrets
 
 
 def load_task(args: argparse.Namespace) -> str:
@@ -47,6 +53,21 @@ def validate_mode_arguments(args: argparse.Namespace) -> None:
         raise RuntimeError("--run-id is required when --mode resume is used")
     if args.mode != "resume" and args.run_id:
         raise RuntimeError("--run-id is only valid with --mode resume")
+    if args.mode == "resume":
+        # A pure argument error belongs with the other argument checks, not after
+        # resolve_binary and credential_key. It used to sit inside main() past
+        # both, so a bad --run-id surfaced as "runtime is missing" on a machine
+        # that had not installed one. '+' is rejected because the
+        # `<sandbox>+<attempt>` artifact naming depends on it never occurring.
+        # '+' because the `<sandbox>+<attempt>` artifact naming depends on it
+        # never occurring in a run id, and the glob metacharacters because
+        # maintain._run_log_files interpolates a run id straight into a glob
+        # pattern — an id containing `*` would match another run's files.
+        bad = [c for c in "/\\+*?[]" if c in args.run_id]
+        if bad or args.run_id.startswith("."):
+            raise RuntimeError(
+                "invalid --run-id (path separators, a leading dot, '+' and glob "
+                f"metacharacters are not allowed): {args.run_id}")
 
 
 def dry_run_summary(provider: providers.Provider, mode: str, workdir: Path, *, permission_profile: str | None = None) -> dict:
@@ -104,6 +125,14 @@ def main(argv: list[str] | None = None) -> int:
         if not workdir.is_dir():
             raise RuntimeError(f"work directory does not exist: {workdir}")
         task = load_task(args)
+        # Before anything is provisioned, resolved or sent: the task goes
+        # verbatim to a third-party endpoint, so a secret in it is exfiltrated
+        # the moment a worker starts. This runs ahead of runner resolution and
+        # sandbox setup, so its refusal is the error the author sees rather than
+        # a later one. It does NOT run before credentials are read — building
+        # the exact-match list below opens every configured key file, which is
+        # the price of scanning for this machine's own secrets.
+        taskguard.check_task(task, known_secrets=_configured_secrets())
 
         if args.dry_run:
             print(json.dumps(dry_run_summary(provider, args.mode, workdir, permission_profile=args.permissions), indent=2))
@@ -120,8 +149,6 @@ def main(argv: list[str] | None = None) -> int:
         runtime.ensure_private_directory(logs)
         run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(4)}"
         if args.mode == "resume":
-            if "/" in args.run_id or "\\" in args.run_id or args.run_id.startswith("."):
-                raise RuntimeError(f"invalid --run-id (path separators/leading dot not allowed): {args.run_id}")
             sandbox = providers.run_paths(provider, args.run_id)
             if not sandbox["root"].is_dir():
                 raise RuntimeError(
@@ -136,14 +163,26 @@ def main(argv: list[str] | None = None) -> int:
                 provider, runner.runner_environment(provider, config, paths=sandbox),
                 paths=sandbox,
             )
-            log_path = logs / f"{run_id}.jsonl"
-            stderr_path = logs / f"{run_id}.stderr.log"
+            # A resumed attempt's files are named "<sandbox>+<attempt>" so the
+            # lifecycle tools can map a log back to the sandbox whose lock guards
+            # it. Without the prefix `maintain logs` looked for a sandbox named
+            # after the fresh attempt id, never found one, and deleted the logs
+            # of a live resume.
+            log_stem = f"{args.run_id}+{run_id}" if args.mode == "resume" else run_id
+            log_path = logs / f"{log_stem}.jsonl"
+            stderr_path = logs / f"{log_stem}.stderr.log"
             agent = policy.MODE_TO_AGENT[args.mode]
             prompt = runner.format_task_input(task, args.mode)
             command = runner.build_command(binary, provider, args.mode, workdir, run_id, args.session)
 
             try:
-                renderer = fmt_events.FmtWriter(logs, provider.key, run_id, os.getpid())
+                # log_stem, not run_id: the rendered archive is a per-run
+                # artifact like the jsonl, and `maintain` globs for it under
+                # the same `<sandbox>+<attempt>` convention. Naming it after
+                # the attempt alone put 3 of the 5 per-run files outside the
+                # convention the other 2 established.
+                renderer = fmt_events.FmtWriter(
+                    logs, provider.key, log_stem, os.getpid())
             except Exception as exc:
                 print(f"note: live log rendering unavailable ({exc})", file=sys.stderr)
                 renderer = None
@@ -156,6 +195,14 @@ def main(argv: list[str] | None = None) -> int:
                 "mode": args.mode,
                 "agent": agent,
                 "run_id": run_id,
+                # The id to pass as --run-id to resume THIS work, which for a
+                # resume is NOT run_id: a resume has to mint a fresh run_id
+                # because open_private_text is O_CREAT|O_EXCL and cannot reopen
+                # the original jsonl. Reporting only run_id meant a planner that
+                # resumed twice passed an id no sandbox had ever had, and the
+                # failure blamed retention ("session expired") while the sandbox
+                # sat there under its original name.
+                "resume_run_id": args.run_id or run_id,
                 "workdir": str(workdir),
                 "log": str(log_path),
                 "stderr_log": str(stderr_path),
@@ -185,6 +232,7 @@ def main(argv: list[str] | None = None) -> int:
                 "mode": args.mode,
                 "agent": agent,
                 "run_id": run_id,
+                "resume_run_id": started["resume_run_id"],
                 "session_id": result.session_id or args.session,
                 "workdir": str(workdir),
                 "log": str(log_path),

@@ -29,7 +29,8 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Any
 
-from pilot_workers import policy, providers, runtime
+from pilot_workers import policy, providers, runtime, taskguard
+from pilot_workers.cli.dispatch import STDERR_TAIL_BYTES
 from pilot_workers.runners import get_runner
 
 
@@ -72,7 +73,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--workdir",
         default=None,
-        help="Existing project directory passed to every worker.",
+        help="Existing project directory passed to every worker (required).",
     )
     parser.add_argument(
         "--job",
@@ -142,11 +143,18 @@ class _SpecError(RuntimeError):
 def _validate_job(job: Job) -> None:
     if job.provider not in providers.PROVIDERS:
         raise _SpecError(f"unknown provider: {job.provider}")
+    # A provider YAML may name a runner that does not exist. get_runner raises a
+    # plain RuntimeError, which sailed past `except _SpecError` in main and left a
+    # traceback where every other bad job spec gives one clean line.
+    try:
+        get_runner(providers.PROVIDERS[job.provider].runner)
+    except (KeyError, RuntimeError) as exc:
+        raise _SpecError(f"provider {job.provider}: {exc}") from None
     if job.mode not in policy.MODE_TO_AGENT:
         raise _SpecError(f"unknown mode: {job.mode}")
     if job.mode == "resume":
         raise _SpecError("resume is not supported in fanout")
-    if not Path(job.task_file).is_file():
+    if not Path(job.task_file).expanduser().is_file():
         raise _SpecError(f"task file not found: {job.task_file}")
 
 
@@ -155,6 +163,19 @@ def _parse_job_spec(spec: str) -> Job:
     if len(parts) != 3 or not all(parts):
         raise _SpecError(f"invalid --job spec (expected PROVIDER:MODE:TASK_FILE): {spec}")
     return Job(provider=parts[0], mode=parts[1], task_file=parts[2])
+
+
+def _require_bool(value: object) -> bool:
+    """Every other jobs-file field is validated strictly; this one was coerced.
+
+    `bool("false")` is True, so a JSON string arrived as the opposite of what it
+    said — and `worktree` is what keeps two concurrent code jobs out of each
+    other's working directory.
+    """
+    if not isinstance(value, bool):
+        raise _SpecError(
+            f'jobs file "worktree" must be true or false, got {value!r}')
+    return value
 
 
 def _load_jobs_file(path_arg: str) -> list[Job]:
@@ -184,7 +205,7 @@ def _load_jobs_file(path_arg: str) -> list[Job]:
                 provider=str(entry["provider"]),
                 mode=str(entry["mode"]),
                 task_file=str(entry["task_file"]),
-                worktree=bool(entry.get("worktree", False)),
+                worktree=_require_bool(entry.get("worktree", False)),
             )
         )
     return jobs
@@ -235,8 +256,50 @@ def _credential_preflight(jobs: list[Job]) -> None:
         if not meta.get("configured"):
             raise _SpecError(
                 f"credential missing for {job.provider}; "
-                f"run: pilot-workers credentials {job.provider}"
+                f"{providers.credential_setup_hint(job.provider)}"
             )
+        if not meta.get("secure_mode"):
+            # `credential_key` refuses a file wider than 0600 on the dispatch
+            # path, so without this every child spawned, started up and failed
+            # on the same thing this check can see for free.
+            raise _SpecError(
+                f"credential file for {job.provider} is not private "
+                f"(expected mode 0600): {meta.get('path')}"
+            )
+
+
+def _task_content_preflight(jobs: list[Job]) -> None:
+    """Refuse a task no worker would accept, before any worker is paid for.
+
+    ``taskguard`` already runs inside every ``run`` child, so nothing unsafe is
+    ever sent — each job guards its own task. What a child cannot do is stop the
+    OTHER jobs: a fanout whose last task file held an unfilled placeholder
+    dispatched the earlier ones to paid third-party endpoints first, then
+    refused. Same reason the credential check is here.
+
+    Reads each distinct task file once — the ``--providers`` shorthand points
+    every job at one file.
+    """
+    secrets = runtime.configured_secrets()
+    seen: set[Path] = set()
+    for job in jobs:
+        path = Path(job.task_file).expanduser().resolve()
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            if path.stat().st_size > providers.MAX_TASK_BYTES:
+                raise _SpecError(
+                    f"task file exceeds {providers.MAX_TASK_BYTES} bytes: {path}")
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise _SpecError(f"cannot read task file {path}: {exc}")
+        if not text.strip():
+            raise _SpecError(f"task file is empty: {path}")
+        try:
+            taskguard.check_task(text.strip(), known_secrets=secrets)
+        except RuntimeError as exc:
+            raise _SpecError(f"{path}: {exc}")
 
 
 def _workdir_collision_guard(jobs: list[Job]) -> None:
@@ -262,6 +325,10 @@ def _workdir_collision_guard(jobs: list[Job]) -> None:
 def _build_dispatch_command(
     job: Job, workdir: str, timeout: int, idle_timeout: int
 ) -> list[str]:
+    # ABSOLUTE, always. The child runs in a directory this tool owns (so nothing
+    # dropped in a shared cwd can be imported ahead of the real package), which
+    # means a relative path from the caller's shell would resolve somewhere else
+    # entirely — after passing this process's own existence checks.
     cmd: list[str] = [
         sys.executable,
         "-m", "pilot_workers.cli.dispatch",
@@ -270,9 +337,9 @@ def _build_dispatch_command(
         "--mode",
         job.mode,
         "--workdir",
-        workdir,
+        str(Path(workdir).expanduser().resolve()),
         "--task-file",
-        job.task_file,
+        str(Path(job.task_file).expanduser().resolve()),
     ]
     if job.worktree:
         cmd.append("--worktree")
@@ -460,6 +527,11 @@ def _run_job(
             text=True,
             bufsize=1,
             start_new_session=True,
+            # Same policy dispatch applies to its own child: only the variables
+            # the child needs, the package pinned, and a cwd this tool owns so
+            # nothing dropped in a shared temp dir can be imported ahead of it.
+            env=runtime.child_environment(),
+            cwd=runtime.child_cwd(),
         )
         procs[index] = proc
         spawn_time = time.monotonic()
@@ -528,12 +600,18 @@ def _run_job(
         proc.wait()
         drain.join(timeout=5)
 
-        # Build stderr_tail: drop heartbeat lines, then take last 500 chars.
+        # Build stderr_tail: drop heartbeat lines, redact, then take the tail.
+        # Redaction matters here for the same reason it does in dispatch: the
+        # child's stream is only scrubbed of the ONE key its run was handed, so
+        # a mention of any other configured key survives — and this tail goes
+        # into the verdict the planner reads. Redact before slicing, or a
+        # replacement straddling the cut would leave a fragment behind.
         filtered = [
             chunk for chunk in stderr_chunks
             if not chunk.startswith(HEARTBEAT_LINE_PREFIX)
         ]
-        stderr_tail = "".join(filtered)[-500:]
+        stderr_tail = runtime.redact_secrets(
+            "".join(filtered), runtime.configured_secrets())[-STDERR_TAIL_BYTES:]
 
         # Reason precedence: a real child verdict line wins verbatim; the
         # recorded reason (if any) is logged to stderr ONLY. The verdict line
@@ -568,7 +646,9 @@ def _run_job(
         results[index] = verdict
     except Exception as exc:  # the array must always be printed
         results[index] = _synthesized_verdict(
-            job, getattr(proc, "returncode", None), str(exc)[-500:],
+            job, getattr(proc, "returncode", None),
+            runtime.redact_secrets(
+                str(exc), runtime.configured_secrets())[-STDERR_TAIL_BYTES:],
         )
 
 
@@ -576,9 +656,17 @@ def run_fanout(args: argparse.Namespace) -> int:
     if not args.workdir:
         print("error: --workdir is required", file=sys.stderr)
         return FANOUT_ERROR_EXIT
+    # One stat here, or N children each paying full interpreter + YAML +
+    # credential startup only to fail on the same missing path.
+    workdir_path = Path(args.workdir).expanduser()
+    if not workdir_path.is_dir():
+        what = "is not a directory" if workdir_path.exists() else "does not exist"
+        print(f"error: work directory {what}: {args.workdir}", file=sys.stderr)
+        return FANOUT_ERROR_EXIT
     try:
         jobs = _build_jobs(args)
         _credential_preflight(jobs)
+        _task_content_preflight(jobs)
         _workdir_collision_guard(jobs)
     except _SpecError as exc:
         print(f"error: {exc}", file=sys.stderr)

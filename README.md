@@ -11,7 +11,7 @@ Dispatch bounded tasks to isolated LLM workers. Your main AI agent (Claude, Code
 - **Pluggable runners**: the runner adapter layer (`Runner` ABC) abstracts engine-specific details. Currently ships with OpenCode; designed for future alternatives.
 - **Observable**: two-line JSON contract (`started` + structured `verdict` carrying `parse_state`, a per-mode `result`, and `final_text_path`) for AI planners; human-readable `latest.log` for `tail -f`.
 - **Per-run sandboxes**: every dispatch runs inside its own isolated XDG tree (`providers/<key>/runs/<run_id>/`) with a zero-copy symlink to the canonical credential and a shared per-provider cache; resume (`--session` + `--run-id`) reuses the original sandbox.
-- **Host-level playbook**: one `pilot-workers` playbook skill per host (Claude Code or Codex). `install claude` / `install codex` deploys the same engine-neutral playbook regardless of which providers you've configured.
+- **Host-level playbook**: one `pilot-workers` playbook skill per host (Claude Code or Codex). A host's skill exists only where at least one provider is configured for it, and its worker table is generated from that host's own configuration — a host never learns about a provider you did not give it.
 
 ## Install
 
@@ -25,14 +25,16 @@ pip install pilot-workers
 # 1. Install the worker runtime
 pilot-workers install runner opencode
 
-# 2. Configure credentials (interactive, key never displayed)
-pilot-workers credentials glm
-pilot-workers credentials kimi-k3
-pilot-workers credentials ds
+# 2. Make a provider available to a host, and set its API key while you are
+#    there (interactive, key never displayed). The key belongs to the PROVIDER,
+#    so it is configured once and every host uses it.
+pilot-workers install glm on claude --global-key
+pilot-workers install kimi-k3 on claude for code --global-key   # ...and route code -> kimi-k3
+pilot-workers install ds on codex for explore --global-key
 
-# 3. Deploy the playbook skill to your host
-pilot-workers install claude    # Claude Code: pilot-workers playbook skill
-pilot-workers install codex     # Codex: same playbook skill
+# 3. (optional) Refresh a host's deployed skill in place
+pilot-workers install claude    # idempotent sync; deploys nothing if no provider is configured
+pilot-workers install codex
 pilot-workers install all       # both hosts
 
 # 4. Check everything is ready
@@ -57,16 +59,19 @@ pilot-workers <subcommand> [args]
   dispatch         Deterministic wrapper around run (two-line JSON: started + verdict).
   fanout           Dispatch several jobs concurrently; stdout = one JSON array of verdicts.
   template         Print the task template for a mode (code|explore|test|review).
-  install          Install host playbook skill or runner.
-                     install <host|all>
+  install          Configure a worker for a host, or deploy/refresh a host's skill.
+                     install <provider> on <host> [for <mode>] [--global-key]
+                     install <host|all> [--target <dir>]
                      install runner <name>
-  uninstall        Remove host playbook skill or runner.
+  uninstall        Remove a worker from a host, an assignment, a key, or a whole host.
+                     uninstall <provider> on <host>
+                     uninstall for <mode> on <host>
+                     uninstall key <provider>
                      uninstall <host|all>
                      uninstall runner <name>
   status           Show provider credentials, host installs, and runner state.
                      status [--json]
                      status <host>
-  credentials      Configure isolated worker credentials.
   maintain         Worker log, run-sandbox, and worktree lifecycle tools.
                      maintain logs --older-than-days N
                      maintain runs --older-than-days N [--keep M]
@@ -93,9 +98,9 @@ output_tokens: 8192
 # notes: ...                # optional, surfaced by `pilot-workers status`
 ```
 
-Then `pilot-workers credentials my-model` and `pilot-workers install claude` (or `codex`) to deploy/refresh the host playbook skill.
+Then `pilot-workers install my-model on claude --global-key` (or `codex`) to set its API key and deploy/refresh that host's playbook skill.
 
-Reserved keys (cannot be used as provider key): `runner`, `all`, `on`, `claude`, `codex`.
+Reserved keys (cannot be used as provider key): `runner`, `all`, `on`, `for`, `key`, `claude`, `codex`.
 
 ## Host integration
 
@@ -104,7 +109,7 @@ The **host** is whatever AI agent acts as the planner. Each host ships ONE `pilo
 - **`claude-host/skills/pilot-workers/`**: playbook skill for Claude Code (installed to `~/.claude/skills/pilot-workers/`)
 - **`codex-host/skills/pilot-workers/`**: the same playbook skill for Codex (installed to `$CODEX_HOME/skills/pilot-workers/`)
 
-`pilot-workers install <host>` copies the skill into the host's skill directory; it carries no engine-specific knowledge and is the same regardless of which providers you've configured. (The v0.4.0 12-agents + 8-commands matrix is gone.)
+`pilot-workers install <provider> on <host>` copies the skill into the host's skill directory and regenerates its worker table from that host's configuration; the doctrine itself carries no engine-specific knowledge. Removing the last provider deletes the skill, so a host with nothing configured has none and the planner does the work itself. (The v0.4.0 12-agents + 8-commands matrix is gone.)
 
 Adding a new host: create `integrations/<name>-host/skills/pilot-workers/`, put whatever config your host needs, point it at `pilot-workers dispatch`. See `integrations/README.md`.
 
@@ -116,7 +121,7 @@ See [CLAUDE.md](CLAUDE.md) for the current architecture, module reference, and c
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest    # 297 tests, all offline
+.venv/bin/pytest    # the whole suite, offline
 ```
 
 ## License

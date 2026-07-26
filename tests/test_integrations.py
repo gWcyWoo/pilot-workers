@@ -55,7 +55,9 @@ SKILL_ANCHORS = (
     "--worktree",
     "resume",
     "--run-id",
-    "spec",          # worth-it self-check
+    # The worth-it self-check. A bare "spec" also matched three unrelated
+    # sentences, so deleting the check left the anchor satisfied.
+    "longer than the diff",
     "background",
     "main session",
     "PILOT_RESULT",
@@ -75,8 +77,15 @@ def test_playbook_skill_present_and_non_stub(host):
     for anchor in SKILL_ANCHORS:
         assert anchor.lower() in lower, f"{path} missing doctrine anchor: {anchor!r}"
     # Doctrine anchors with accepted spelling variants.
-    assert ("spot-check" in lower) or ("spot check" in lower), (
-        f"{path} missing spot-check doctrine"
+    # NOT "spot-check": sampling was removed on purpose. A sample of N of M
+    # conclusions licenses nothing about the other M-N and manufactures
+    # confidence in them. What must survive is verification of the set actually
+    # acted on — review findings — plus checks that are cheap AND complete.
+    assert "verify every finding you intend to act on" in lower, (
+        f"{path} missing verify-before-acting doctrine"
+    )
+    assert "diff --stat" in lower, (
+        f"{path} missing the complete changed-file-set check"
     )
     assert ("cross-model" in lower) or ("different provider" in lower), (
         f"{path} missing cross-model review doctrine"
