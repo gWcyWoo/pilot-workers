@@ -104,12 +104,12 @@ Reserved keys (cannot be used as provider key): `runner`, `all`, `on`, `for`, `k
 
 ## Host integration
 
-The **host** is whatever AI agent acts as the planner. Each host ships ONE `pilot-workers` playbook skill (a doctrine playbook, not provider-specific syntax):
+The **host** is whatever AI agent acts as the planner. Each host ships ONE `pilot-workers` playbook skill (a doctrine playbook, not provider-specific syntax) — a core `SKILL.md` plus five on-demand `modes/<mode>.md` playbooks, so triggering loads the core only and mode craft is read per dispatch:
 
 - **`claude-host/skills/pilot-workers/`**: playbook skill for Claude Code (installed to `~/.claude/skills/pilot-workers/`)
 - **`codex-host/skills/pilot-workers/`**: the same playbook skill for Codex (installed to `$CODEX_HOME/skills/pilot-workers/`)
 
-`pilot-workers install <provider> on <host>` copies the skill into the host's skill directory and regenerates its worker table from that host's configuration; the doctrine itself carries no engine-specific knowledge. Removing the last provider deletes the skill, so a host with nothing configured has none and the planner does the work itself. (The v0.4.0 12-agents + 8-commands matrix is gone.)
+`pilot-workers install <provider> on <host>` copies the skill into the host's skill directory and regenerates its worker table from that host's configuration; the doctrine itself carries no engine-specific knowledge. The deployed tree is a build artifact — every install re-renders it from the packaged template, so upgrading is `pip` upgrade + `pilot-workers install <host|all>` (hosts with nothing configured are untouched). Removing the last provider deletes the skill, so a host with nothing configured has none and the planner does the work itself. (The v0.4.0 12-agents + 8-commands matrix is gone.)
 
 Adding a new host: create `integrations/<name>-host/skills/pilot-workers/`, put whatever config your host needs, point it at `pilot-workers dispatch`. See `integrations/README.md`.
 

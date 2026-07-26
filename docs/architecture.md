@@ -168,10 +168,12 @@ All use OpenCode's `@ai-sdk/openai-compatible` adapter. Provider/model/endpoint 
 
 ONE `pilot-workers` playbook skill is deployed per host with `pilot-workers install <host|all>`:
 
-- **Claude Code** (`claude-host/skills/pilot-workers/`): a doctrine playbook (Quick Reference + per-mode sections) installed into `~/.claude/skills/pilot-workers/`.
-- **Codex** (`codex-host/skills/pilot-workers/`): the same playbook skill installed into `$CODEX_HOME/skills/pilot-workers/`.
+- **Claude Code** (`claude-host/skills/pilot-workers/`): a doctrine playbook installed into `~/.claude/skills/pilot-workers/` — a core `SKILL.md` (scenario table, priority chain, dispatch/verdict contracts, red lines) plus five on-demand `modes/<mode>.md` playbooks, so a trigger loads roughly half the tokens and mode craft is read only when that mode is dispatched.
+- **Codex** (`codex-host/skills/pilot-workers/`): the same core + `modes/` layout installed into `$CODEX_HOME/skills/pilot-workers/`.
 
-The skill is a playbook, not CLI syntax docs: it carries the dispatch doctrine (axis-splitting, worth-it self-checks, cross-model review for rewrite-scale diffs, fanout recipes, `--worktree` for parallel code jobs, resume-first recovery, verdict-state handling matrix, dispatch-from-main-session-only). The v0.4.0 12-agents + 8-commands matrix is gone. Integration files reference the public CLI interface (`pilot-workers template`, `pilot-workers dispatch`) — they carry no engine-specific knowledge.
+The deployed tree is a **build artifact**: every `install` (host or provider form) re-renders it from the packaged template plus the recorded config, so a package upgrade propagates with `pip` upgrade + `pilot-workers install <host|all>` — and `install all` touches only hosts that have at least one provider configured. Hand edits to deployed files do not survive a sync; custom doctrine belongs in the packaged template.
+
+The skill is a playbook, not CLI syntax docs: it carries the dispatch doctrine (the provider-choice priority chain — explicit user input, then the routed Workers table as a mandate, then do-it-yourself for unrouted modes — plus axis-splitting, cross-model review for rewrite-scale diffs, fanout recipes, `--worktree` for parallel code jobs, resume-first recovery, verdict-state handling matrix, dispatch-from-main-session-only). The v0.4.0 12-agents + 8-commands matrix is gone. Integration files reference the public CLI interface (`pilot-workers template`, `pilot-workers dispatch`) — they carry no engine-specific knowledge.
 
 ## Security model
 

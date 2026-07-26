@@ -169,7 +169,7 @@ def test_the_host_doctrine_tells_the_planner_to_refute_a_finding(host):
 
     skill = (Path(pilot_workers.__file__).resolve().parent / "integrations"
              / f"{host}-host" / "skills" / "pilot-workers"
-             / "SKILL.md").read_text(encoding="utf-8")
+             / "modes" / "review.md").read_text(encoding="utf-8")
     flat = " ".join(skill.split()).lower()
     assert "refute" in flat, f"{host} doctrine never says to argue against a finding"
     assert "cannot run code" in flat, (

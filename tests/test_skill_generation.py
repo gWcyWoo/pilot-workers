@@ -35,6 +35,12 @@ def _claude_skill(isolated) -> Path:
     return isolated["target"] / "skills" / "pilot-workers" / "SKILL.md"
 
 
+def _mode_doctrine(host: str, mode: str) -> str:
+    """The packaged per-mode playbook (modes/<mode>.md after the split)."""
+    return (install_mod.INTEGRATIONS_DIR / f"{host}-host" / "skills"
+            / "pilot-workers" / "modes" / f"{mode}.md").read_text(encoding="utf-8")
+
+
 def _manifest(isolated) -> dict:
     path = isolated["home"] / "install-manifest.json"
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -419,8 +425,13 @@ def test_clearing_a_default_regenerates_without_the_mode(isolated):
     assert "explore" not in region  # but no longer the default
 
 
-def test_hand_edited_doctrine_survives_regeneration(isolated):
-    """Marker regions exist so a user's own edits are not destroyed."""
+def test_a_provider_install_converges_hand_edits_away(isolated):
+    """Inverted by decision: the deployed tree is a build artifact, so every
+    install of any form converges it to the packaged render. Hand-edit
+    preservation was retired — it also blocked packaged doctrine updates from
+    ever reaching an existing deployment, and it only ever covered the body
+    (frontmatter, region and modes/*.md were rewritten regardless).
+    """
     t = str(isolated["target"])
     install_mod.main(["glm", "on", "claude", "--target", t])
     path = _claude_skill(isolated)
@@ -431,8 +442,7 @@ def test_hand_edited_doctrine_survives_regeneration(isolated):
     install_mod.main(["ds", "on", "claude", "--target", t])
 
     text = path.read_text(encoding="utf-8")
-    assert "## My own note" in text
-    assert "keep me" in text
+    assert "## My own note" not in text
     assert "ds" in text
 
 
@@ -529,27 +539,6 @@ def test_placeholder_is_replaced_for_every_configured_provider(isolated):
 # ----------------------------------------------------------------------
 # cross-model review follow-ups
 # ----------------------------------------------------------------------
-
-
-def test_bare_host_install_preserves_hand_edits(isolated):
-    """The bare-host path purges and re-copies, so it must save the old text too.
-
-    The provider-install path already did this; this covers the OTHER path,
-    which read the freshly-copied package template as its base and so silently
-    destroyed anything the user had added outside the markers.
-    """
-    t = str(isolated["target"])
-    install_mod.main(["glm", "on", "claude", "--target", t])
-    path = _claude_skill(isolated)
-    path.write_text(
-        path.read_text(encoding="utf-8") + "\n## My own note\nkeep me\n",
-        encoding="utf-8")
-
-    assert install_mod.main(["claude", "--target", t]) == 0
-
-    text = path.read_text(encoding="utf-8")
-    assert "## My own note" in text
-    assert "keep me" in text
 
 
 def test_flat_v3_entry_with_no_providers_is_left_alone(isolated):
@@ -739,10 +728,10 @@ def test_skill_tells_the_planner_to_read_the_worker_table(host):
                 / "skills" / "pilot-workers" / "SKILL.md")
     text = packaged.read_text(encoding="utf-8")
 
-    # Must appear in the header doctrine, BEFORE the per-mode sections: a
-    # mention buried in "Mode: code" passed while the planner's first decision
-    # went unaddressed.
-    header = _flat(text[:text.index("Mode:")])
+    # Must appear in the always-loaded core doctrine (the per-mode sections
+    # moved to modes/*.md): a mention buried in a child file would reach the
+    # planner only after it had already decided how to handle the request.
+    header = _flat(text[:text.index(install_mod.GENERATED_BEGIN)])
     assert "Workers table" in header, (
         "the provider-choice doctrine never points at the generated table")
 
@@ -756,7 +745,8 @@ def test_skill_states_the_users_word_wins(host):
     # The rule is the OVERRIDE, not the trigger: an explicit provider beats the
     # configured table. Asserting only "names a provider" passed on the trigger
     # clause while saying nothing about precedence.
-    assert "that always wins" in doctrine, "no statement that explicit wins"
+    assert "explicit user input always wins" in doctrine, (
+        "no statement that explicit wins")
 
 
 def test_deployed_skill_pairs_the_doctrine_with_the_live_table(isolated):
@@ -782,13 +772,7 @@ def test_code_verification_defers_to_an_assigned_tester(host):
     the `for test` assignment: the main session would run the suite it had just
     delegated. Judgment stays with the planner; executing the run does not.
     """
-    packaged = (install_mod.INTEGRATIONS_DIR / f"{host}-host"
-                / "skills" / "pilot-workers" / "SKILL.md")
-    text = packaged.read_text(encoding="utf-8")
-
-    marker = text.index(install_mod.GENERATED_BEGIN)
-    doctrine = text[:marker]
-    code_section = doctrine[doctrine.index("Mode: code"):]
+    code_section = _mode_doctrine(host, "code")
 
     assert "run tests/lint yourself" not in code_section
     assert "assigned to `test`" in code_section, (
@@ -802,10 +786,7 @@ def test_explore_doctrine_has_no_ritual_spot_check(host):
     information the planner is about to USE, so planning verifies it: a large
     gap goes back to the explorer, a few lines are read here.
     """
-    packaged = (install_mod.INTEGRATIONS_DIR / f"{host}-host"
-                / "skills" / "pilot-workers" / "SKILL.md")
-    text = packaged.read_text(encoding="utf-8")
-    explore = _flat(text[text.index("Mode: explore"):text.index("Mode: code")])
+    explore = _flat(_mode_doctrine(host, "explore"))
 
     assert "trust the whole report" not in explore
     # "Spot-check" was deleted long ago, so asserting its absence caught nothing.
@@ -820,10 +801,7 @@ def test_explore_doctrine_has_no_ritual_spot_check(host):
 def test_review_findings_are_still_verified_before_acting(host):
     """Unlike exploration, a review finding is a CLAIM acted on by editing code:
     a false positive causes a wrong edit, so it must be checked first."""
-    packaged = (install_mod.INTEGRATIONS_DIR / f"{host}-host"
-                / "skills" / "pilot-workers" / "SKILL.md")
-    text = packaged.read_text(encoding="utf-8")
-    review = _flat(text[text.index("Mode: review"):]).lower()
+    review = _flat(_mode_doctrine(host, "review")).lower()
     # The instruction, not just the motivation.
     assert "verify every finding you intend to act on" in review
 
@@ -837,10 +815,7 @@ def test_code_verification_checks_the_file_set_not_diff_samples(host):
     nothing about the rest — correctness is established by the test run, the
     end-to-end check, and cross-model review for large diffs.
     """
-    packaged = (install_mod.INTEGRATIONS_DIR / f"{host}-host"
-                / "skills" / "pilot-workers" / "SKILL.md")
-    text = packaged.read_text(encoding="utf-8")
-    code = _flat(text[text.index("Mode: code"):text.index("Mode: test")])
+    code = _flat(_mode_doctrine(host, "code"))
 
     # Assert on the CONCEPT, not one phrasing: earlier versions of this test
     # pinned an exact wording and passed while the sampling step was still there.
@@ -974,10 +949,7 @@ def test_review_verifies_every_acted_on_finding_not_a_sample(host):
     so a false positive causes a wrong edit. But "spot-check 1-2" is sampling:
     the principled form is complete verification over the set you will act on.
     """
-    packaged = (install_mod.INTEGRATIONS_DIR / f"{host}-host"
-                / "skills" / "pilot-workers" / "SKILL.md")
-    review = _flat(packaged.read_text(encoding="utf-8"))
-    review = review[review.index("Mode: review"):]
+    review = _flat(_mode_doctrine(host, "review"))
 
     # Not "Spot-check 1-2": that phrasing is long gone, so its absence proves
     # nothing. What must hold is the positive rule and its reason.
@@ -991,10 +963,7 @@ def test_code_doctrine_reconciles_the_workers_own_file_list(host):
     """A complete cheap check that was missing: the worker reports
     FILES_CHANGED, and `git diff --stat` says what actually changed. Comparing
     them costs nothing and catches a worker that misreports its own work."""
-    packaged = (install_mod.INTEGRATIONS_DIR / f"{host}-host"
-                / "skills" / "pilot-workers" / "SKILL.md")
-    code = _flat(packaged.read_text(encoding="utf-8"))
-    code = code[code.index("Mode: code"):code.index("Mode: test")]
+    code = _flat(_mode_doctrine(host, "code"))
     assert "FILES_CHANGED" in code, "the worker's own file list is never reconciled"
 
 
@@ -1266,3 +1235,201 @@ def test_an_unassigned_mode_is_not_advertised(isolated):
         assert f"{mode} →" not in routing, (
             f"the routing clause advertises {mode}, which nothing is assigned to")
     assert "explore → ds" in description, description
+
+
+def test_the_routed_description_forbids_the_worth_it_judgment(isolated):
+    """The second escape hatch, found live: v0.5.3 routed by mode, but the
+    static half of the description still said "Use whenever a task is worth
+    delegating ... Not for small tweaks", so a three-file exploration was
+    judged not worth a worker and the skill never loaded — the table in the
+    body was unreachable again, through economics instead of naming. A routed
+    mode is a mandate the user configured; the description must say so and
+    must not invite the model to re-make that decision per task.
+    """
+    description = _deployed_description(isolated, {
+        "providers": ["ds"], "modes": {"explore": "ds"},
+    })
+    assert "never weigh" in description, description
+    assert "worth delegating" not in description, description
+    assert "Not for small tweaks" not in description, description
+
+
+def test_the_description_names_the_explicit_user_override(isolated):
+    """Config is a mandate, so the description must state the one thing
+    stronger than it: explicit user input — naming a provider, or asking for
+    the work to stay in this session.
+    """
+    description = _deployed_description(isolated, {
+        "providers": ["ds"], "modes": {"explore": "ds"},
+    })
+    assert "Explicit user input is the only override" in description, description
+
+
+def test_the_deployed_frontmatter_parses_as_yaml(isolated):
+    """The generated sentence is spliced into YAML frontmatter, and the host
+    parses that frontmatter before anything else — a description that breaks
+    YAML can unlist the whole skill. Not hypothetical: v0.5.3 generated
+    "Route by MODE, not by name: explore ..." whose unquoted mid-value ": "
+    is a scanner error in strict YAML ("mapping values are not allowed here").
+    """
+    yaml = pytest.importorskip("yaml")
+    with install_mod.manifest_transaction() as installs:
+        install_mod.add_host_provider(installs, "claude", "ds")
+        install_mod.add_host_provider(installs, "claude", "kimi-k3")
+        for mode, key in (("explore", "ds"), ("test", "ds"),
+                          ("code", "kimi-k3"), ("review", "kimi-k3")):
+            install_mod.set_host_mode(installs, "claude", mode, key)
+    install_mod.main(["claude", "--target", str(isolated["target"])])
+    text = _claude_skill(isolated).read_text(encoding="utf-8")
+    front = install_mod._frontmatter_block(text)
+    assert front is not None
+    inner = front.removeprefix("---\n").removesuffix("\n---\n")
+    parsed = yaml.safe_load(inner)
+    assert isinstance(parsed, dict), parsed
+    description = parsed.get("description")
+    assert isinstance(description, str), parsed
+    # The routing must have survived parsing INSIDE the description value,
+    # not leaked into a sibling mapping key.
+    assert "explore, test → ds" in description, description
+
+
+# ----------------------------------------------------------------------
+# Scenario surface: the description must LOOK like the requests it routes.
+#
+# Found live, twice: trigger matching is similarity between the user's words
+# and the description text, and a description made of pure policy prose
+# ("MUST dispatch ... never weigh") shares no surface with "探索一下上传简历
+# 后的详细流程处理" — the mandate says what to do once the skill is noticed;
+# example phrasings are what get it noticed. The second scenario class is the
+# model's OWN mid-task impulse (reading code to understand it before planning
+# a fix), which spends far more tokens than user-stated exploration.
+# ----------------------------------------------------------------------
+
+def test_the_routed_description_carries_example_phrases(isolated):
+    """Routed modes advertise example requests, including Chinese — the user
+    prompts in Chinese, and the matcher eats exactly that."""
+    description = _deployed_description(isolated, {
+        "providers": ["ds"], "modes": {"explore": "ds"},
+    })
+    assert "探索" in description, description
+    assert "how does" in description, description
+
+
+def test_an_unrouted_mode_advertises_no_example_phrases(isolated):
+    """A host routing only explore must not carry test-mode trigger bait —
+    the sibling rule to not advertising an unassigned mode's routing."""
+    description = _deployed_description(isolated, {
+        "providers": ["ds"], "modes": {"explore": "ds"},
+    })
+    assert "跑一下测试" not in description, description
+    assert "run the tests" not in description, description
+
+
+def test_the_description_binds_the_models_own_impulses(isolated):
+    """Scenario two: mid-task, the model realizes it needs to read code —
+    that moment is a dispatch. The boundary is drawn by PURPOSE (learning vs
+    verifying a known location), never by size: a size threshold is the
+    falsified worth-it hatch under a new name."""
+    description = _deployed_description(isolated, {
+        "providers": ["ds"], "modes": {"explore": "ds"},
+    })
+    assert "your own" in description, description
+    assert "stays local" in description, description
+
+
+def test_the_description_fits_the_host_listing_budget(isolated):
+    """Claude Code truncates a skill's combined listing text at ~1536 chars;
+    a longer description silently loses its tail — where the override clause
+    lives. Measured on the fullest realistic config (two providers, all four
+    modes routed), with margin."""
+    description = _deployed_description(isolated, {
+        "providers": ["ds", "kimi-k3"],
+        "modes": {"explore": "ds", "test": "ds",
+                  "code": "kimi-k3", "review": "kimi-k3"},
+    })
+    assert len(description) < 1500, len(description)
+
+
+# ----------------------------------------------------------------------
+# Progressive disclosure: per-mode craft lives in modes/<mode>.md, deployed
+# and removed with the skill, so a trigger loads ~half the tokens and mode
+# doctrine is read only when that mode is dispatched.
+# ----------------------------------------------------------------------
+
+def test_install_deploys_the_mode_files(isolated):
+    t = str(isolated["target"])
+    install_mod.main(["ds", "on", "claude", "--target", t])
+    modes_dir = _claude_skill(isolated).parent / "modes"
+    for mode in ("explore", "code", "test", "review", "resume"):
+        assert (modes_dir / f"{mode}.md").is_file(), f"missing {mode}.md"
+
+
+# ----------------------------------------------------------------------
+# Upgrade propagation: the deployed tree is a BUILD ARTIFACT.
+#
+# Found live: the mode-split shipped in the package and never arrived — the
+# refresh used the deployed file as its splice base (hand-edit preservation),
+# so the frontmatter and Workers region updated while the body doctrine
+# stayed at whatever version first deployed it. Decided: every install
+# re-renders from the packaged template + recorded config; custom doctrine
+# belongs in the packaged template, not in the generated output (which was
+# half-clobbered on every refresh anyway — frontmatter, region, modes/*.md).
+# ----------------------------------------------------------------------
+
+def _upgraded_package(monkeypatch, sentinel: str):
+    original = install_mod._packaged_skill_text("claude")
+    upgraded = original.replace(
+        "# pilot-workers Playbook",
+        f"# pilot-workers Playbook\n\n{sentinel}")
+    assert sentinel in upgraded, "fixture failed to inject the sentinel"
+    monkeypatch.setattr(install_mod, "_packaged_skill_text",
+                        lambda host: upgraded)
+
+
+def test_a_packaged_body_update_reaches_an_existing_deployment(isolated, monkeypatch):
+    """Host-form sync after a package upgrade must deliver the new body."""
+    t = str(isolated["target"])
+    install_mod.main(["ds", "on", "claude", "--target", t])
+    _upgraded_package(monkeypatch, "Doctrine added by a package upgrade.")
+
+    install_mod.main(["claude", "--target", t])
+
+    deployed = _claude_skill(isolated).read_text(encoding="utf-8")
+    assert "Doctrine added by a package upgrade." in deployed
+
+
+def test_a_provider_install_also_rerenders_the_deployed_body(isolated, monkeypatch):
+    """The provider path's no-target refresh branch obeys the same rule."""
+    t = str(isolated["target"])
+    install_mod.main(["ds", "on", "claude", "--target", t])
+    _upgraded_package(monkeypatch, "Doctrine added by a package upgrade.")
+
+    install_mod.main(["kimi-k3", "on", "claude"])
+
+    deployed = _claude_skill(isolated).read_text(encoding="utf-8")
+    assert "Doctrine added by a package upgrade." in deployed
+
+
+def test_hand_edits_to_the_deployed_skill_do_not_survive_a_sync(isolated):
+    """The explicit contract replacing the half-promise: generated output is
+    not a config surface, and a sync converges it to the packaged render."""
+    t = str(isolated["target"])
+    install_mod.main(["ds", "on", "claude", "--target", t])
+    skill = _claude_skill(isolated)
+    skill.write_text(skill.read_text(encoding="utf-8") + "\nMy hand edit.\n",
+                     encoding="utf-8")
+
+    install_mod.main(["claude", "--target", t])
+
+    assert "My hand edit." not in skill.read_text(encoding="utf-8")
+
+
+def test_uninstalling_the_last_provider_removes_the_mode_files(isolated):
+    """The skill-exists-iff-configured invariant covers the whole tree: a
+    leftover modes/ directory is stale doctrine a future skill could absorb."""
+    t = str(isolated["target"])
+    install_mod.main(["ds", "on", "claude", "--target", t])
+    skill_dir = _claude_skill(isolated).parent
+    assert install_mod.uninstall_main(["ds", "on", "claude"]) == 0
+    assert not (skill_dir / "modes").exists(), "modes/ left behind"
+    assert not skill_dir.exists(), "skill directory left behind"

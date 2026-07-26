@@ -495,23 +495,48 @@ def apply_generated_region(skill_text: str, region: str) -> str:
     return before + GENERATED_BEGIN + inner + GENERATED_END + after
 
 
+# Example requests per mode, spliced into the generated description so the
+# trigger has surface area that RESEMBLES real prompts — policy prose shares
+# no tokens with an actual request like asking to trace a flow. Bilingual
+# because users prompt in Chinese too; only ROUTED modes get their examples
+# advertised (the sibling rule to not advertising an unassigned mode's
+# routing). No ": " anywhere — the description must stay a valid plain YAML
+# scalar. resume is planner-internal recovery, so it has no user phrasing.
+MODE_TRIGGER_EXAMPLES: dict[str, tuple[str, ...]] = {
+    "explore": ('"how does X work"', '"trace this flow"',
+                '"探索/梳理/读一下这块代码"'),
+    "code": ('"implement/fix/refactor X"', '"改一下/实现/修复"'),
+    "test": ('"run the tests"', '"跑一下测试"'),
+    "review": ('"review this change"', '"review 一下这次改动"'),
+}
+
+
 def render_trigger_sentence(provider_keys: list[str],
                             modes: dict[str, str]) -> str:
     """The frontmatter's trigger clause, generated from the host's ROUTING.
 
     This is the only part of the skill a model sees before deciding whether to
-    load it, so it decides what the whole feature can do. It used to read
-    "Trigger when the user names a worker provider — ds, kimi-k3", which is the
-    most specific clause in the description and therefore the operative one — so
-    "explore this codebase" never loaded the skill, and the mode -> provider table
-    (which lives in the BODY) was never read. The assignment recorded by
-    ``install ds on claude for explore`` was unreachable at trigger time: stored,
-    displayed by ``status``, rendered into the skill, and unable to fire.
+    load it, so it decides what the whole feature can do. Two failure modes are
+    on record, both found live:
 
-    The point of the assignment is that the user does NOT name a provider. So the
-    modes come first, in an explicit ``mode, mode -> provider`` form, and naming a
-    provider stays as an additional path. A host with no assignments routes
-    nothing and must not claim otherwise.
+    - v0.5.2 read "Trigger when the user names a worker provider — ds, kimi-k3",
+      the most specific clause in the description and therefore the operative
+      one — so "explore this codebase" never loaded the skill, and the
+      mode -> provider table (which lives in the BODY) was never read.
+    - v0.5.3 routed by mode but left the judgment open: the surrounding static
+      text still said "worth delegating ... Not for small tweaks", so a small
+      exploration was judged not worth a worker and the skill never loaded.
+      Routing is a MANDATE — ``install ... for <mode>`` is the user making the
+      delegation decision once; the sentence must close the per-task
+      re-judgment, and the only stated override is explicit user input (the
+      top of the priority chain: user input, then config, then do-it-yourself
+      fallback).
+
+    Also load-bearing: NO unquoted colon-space anywhere in the sentence. The
+    clause is spliced into a plain YAML scalar, and a mid-value ": " is a
+    scanner error in strict YAML — v0.5.3's "Route by MODE, not by name:
+    explore" made the whole deployed frontmatter unparseable. A host with no
+    assignments routes nothing and must not claim otherwise.
     """
     names = ", ".join(provider_keys)
     routed: dict[str, list[str]] = {}
@@ -521,13 +546,28 @@ def render_trigger_sentence(provider_keys: list[str],
     if not routed:
         return (f"No mode is routed on this host yet, so nothing is delegated "
                 f"automatically; naming a provider ({names}) triggers this skill.")
-    groups = "; ".join(
-        f"{', '.join(sorted(mode_list))} \u2192 {key}"
-        for key, mode_list in sorted(routed.items()))
-    return (f"Route by MODE, not by name: {groups}. A request for that kind of "
-            f"work triggers this skill even when the user names no provider — "
-            f"which is the point of the routing — and naming one ({names}) "
-            f"triggers it too.")
+    parts = []
+    for key, mode_list in sorted(routed.items()):
+        head = ", ".join(sorted(mode_list))
+        examples = ", ".join(
+            ex for m in sorted(mode_list)
+            for ex in MODE_TRIGGER_EXAMPLES.get(m, ()))
+        suffix = f" (e.g. {examples})" if examples else ""
+        parts.append(f"{head} \u2192 {key}{suffix}")
+    groups = "; ".join(parts)
+    return (f"This host routes work by mode — {groups}. A request for a routed "
+            f"kind of work MUST be dispatched through this skill to its "
+            f"assigned provider, even when the task looks too small to be "
+            f"worth a worker. Never do routed work in this session and never "
+            f"weigh whether delegation is worth it — the `install ... for "
+            f"<mode>` that created the route already made that decision. The "
+            f"route also binds your own mid-task moves — realizing you need "
+            f"to read code to understand it, write code, run tests, or "
+            f"review a diff means dispatching, not doing it here; only "
+            f"verifying a known location (a cited file, a returned diff or "
+            f"verdict) stays local. Explicit user input is the only override "
+            f"— naming a provider ({names}) selects it, and an explicit "
+            f"request to do the work here keeps it here.")
 
 
 def substitute_trigger_placeholder(skill_text: str,
@@ -564,36 +604,27 @@ def _packaged_skill_text(host: str) -> str:
             / "SKILL.md").read_text(encoding="utf-8")
 
 
-def _render_deployed_skill(installs: dict, host: str, base_text: str) -> str:
-    """The deployed SKILL.md text: worker region + trigger list from config.
+def _render_deployed_skill(installs: dict, host: str) -> str:
+    """The deployed SKILL.md text, rendered from the PACKAGED template.
 
-    ``base_text`` supplies the hand-editable doctrine, so hand edits outside
-    the markers and the frontmatter survive a refresh. The frontmatter is
-    re-derived from package data on every render: the trigger token is
-    consumed by the first deploy, so re-substituting ``base_text`` alone
-    could never drop a provider that was uninstalled later.
+    The deployed tree is a build artifact: every render starts from package
+    data plus the recorded config, so a packaged doctrine update propagates on
+    the next install of any form. It used to rebase on the already-deployed
+    file to preserve hand edits — which meant a package upgrade could never
+    deliver a body update to an existing deployment, while the frontmatter,
+    the generated region and every sibling file were rewritten anyway: half a
+    promise, and the delivered half was permanent staleness. Custom doctrine
+    belongs in the packaged template, where it survives upgrades properly.
+
+    A packaged template without a marker pair makes ``apply_generated_region``
+    raise loudly: that is a packaging bug, never an upgrade state.
     """
     provider_keys = host_providers(installs, host)
     modes = host_modes(installs, host)
     region = render_worker_region(provider_keys, modes)
-    try:
-        out = apply_generated_region(base_text, region)
-    except RuntimeError:
-        # No usable marker pair in the deployed text. That is the normal state
-        # when upgrading from a release whose skill predates the markers, and it
-        # also covers a deployment whose markers were lost to hand-editing —
-        # they are HTML comments, invisible in rendered markdown. Fall back to
-        # the packaged text, which always carries them. Hand edits in the old
-        # file cannot be preserved here: there is no boundary left to preserve
-        # them against.
-        out = apply_generated_region(_packaged_skill_text(host), region)
-    new_front = _frontmatter_block(
-        substitute_trigger_placeholder(_packaged_skill_text(host),
-                                       provider_keys, modes))
-    old_front = _frontmatter_block(out)
-    if new_front is not None and old_front is not None:
-        out = new_front + out[len(old_front):]
-    return out
+    text = substitute_trigger_placeholder(
+        _packaged_skill_text(host), provider_keys, modes)
+    return apply_generated_region(text, region)
 
 
 def _host_config_entry(installs: dict, host: str) -> dict:
@@ -777,33 +808,31 @@ def _deployed_skill_path(entry) -> Path | None:
     return None
 
 
-def _splice_region_into_deployed(installs: dict, host: str) -> None:
-    """Regenerate the worker region of the host's already-deployed SKILL.md.
+def _rerender_deployed_skill(installs: dict, host: str) -> None:
+    """Rewrite the host's already-deployed SKILL.md from the current render.
 
-    Splices into the existing deployed file, so hand edits outside the markers
-    AND outside the frontmatter survive (the frontmatter is re-derived from
-    package data on every render — see ``_render_deployed_skill``). No-op when
-    the host has no deployed skill on record.
+    Full re-render from package data (see ``_render_deployed_skill``), written
+    to the RECORDED path — this is the path routine provider install/uninstall
+    takes, which must not guess a target directory. Sibling files (modes/*.md)
+    are converged by the host-form install; this rewrites the one file whose
+    content depends on the recorded config. No-op when the host has no
+    deployed skill on record.
     """
     skill = _deployed_skill_path(installs.get(host))
     if skill is None or not skill.is_file():
         return
-    # Atomic like every other skill write: this is the path routine provider
-    # install/uninstall takes, and a truncating write_text here would leave a
-    # crash as a half-written doctrine file that nothing detects or repairs.
-    _write_skill_atomically(
-        skill,
-        _render_deployed_skill(installs, host, skill.read_text(encoding="utf-8")))
+    # Atomic like every other skill write: a truncating write_text here would
+    # leave a crash as a half-written doctrine file nothing detects or repairs.
+    _write_skill_atomically(skill, _render_deployed_skill(installs, host))
 
 
 def _deploy_skill_tree(installs: dict, host: str, target: Path | None) -> None:
-    """Deploy/refresh the host's skill tree and splice the current region.
+    """Deploy/refresh the host's skill tree, rendered from package data.
 
     Records ``installed_at``/``package_version``/``files``/``created_dirs``
-    on the host's manifest entry exactly as the host-install path does. On a
-    refresh the region is spliced into the EXISTING deployed SKILL.md text,
-    so hand edits outside the markers and the frontmatter survive a
-    regeneration (the frontmatter is always re-derived from package data).
+    on the host's manifest entry exactly as the host-install path does. The
+    deployed tree is a build artifact: a refresh converges every file to the
+    current packaged render, so package upgrades propagate.
     """
     entry = installs[host]
     # A legacy v1/v2 nesting must be cleaned by whichever install touches the
@@ -816,18 +845,16 @@ def _deploy_skill_tree(installs: dict, host: str, target: Path | None) -> None:
         for key in [k for k in entry
                     if k not in ("providers", "modes")]:
             del entry[key]
+    # The previously deployed SKILL.md path: not a render input (the render
+    # is pure package data + config), but the orphan sweep below must treat
+    # the previous location as in-bounds when --target moves a deployment.
     previous_skill = _deployed_skill_path(entry)
-    previous_text: str | None = None
-    if previous_skill is not None and previous_skill.is_file():
-        previous_text = previous_skill.read_text(encoding="utf-8")
 
     # Render BEFORE anything on disk changes. Copying first and rendering after
     # means a render failure leaves the host with a half-updated skill — or none
     # at all on the purge path. Rendering needs no file, so nothing forces that
     # order.
-    rendered = _render_deployed_skill(
-        installs, host, previous_text if previous_text is not None
-        else _packaged_skill_text(host))
+    rendered = _render_deployed_skill(installs, host)
 
     previous_files = set(entry.get("files") or [])
     result = install_host(host, target, skill_text=rendered)
@@ -1285,7 +1312,7 @@ def _install_provider_on_host(
                     or not existing.is_file()):
                 _deploy_skill_tree(installs, host, target)
             else:
-                _splice_region_into_deployed(installs, host)
+                _rerender_deployed_skill(installs, host)
             if mode is None:
                 if added:
                     print(f"  recorded: {provider_key} on {host}")
@@ -1346,18 +1373,9 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"{host}: no workers configured — nothing to install.")
                     print(f"  next: pilot-workers install <provider> on {host}")
                     continue
-                # Capture the deployed text BEFORE the purge+recopy below, or the
-                # freshly copied package template becomes the splice base and any
-                # prose the user added outside the markers is lost.
-                previous_skill = _deployed_skill_path(previous)
-                previous_text: str | None = None
-                if previous_skill is not None and previous_skill.is_file():
-                    previous_text = previous_skill.read_text(encoding="utf-8")
                 # Render before destroying: a render failure must not leave the host
                 # with a purged skill and nothing to replace it.
-                rendered = _render_deployed_skill(
-                    installs, host, previous_text if previous_text is not None
-                    else _packaged_skill_text(host))
+                rendered = _render_deployed_skill(installs, host)
                 # Migration / reinstall: purge every previous entry for this host
                 # (v3/v4 flat reinstall OR legacy v1 __all__ + v2 providers), then
                 # write a clean host-level v4 entry.
@@ -1380,9 +1398,8 @@ def main(argv: list[str] | None = None) -> int:
                         new_entry["modes"] = previous["modes"]
                 installs[host] = new_entry
                 # The deployed skill reflects the recorded configuration; the copy
-                # above already wrote the text rendered from it (spliced into the
-                # previous text when there was one, so hand edits outside the
-                # markers and the frontmatter survive).
+                # above already wrote the text rendered from package data plus
+                # that configuration.
             # The manifest is committed ONCE, when the transaction exits — not
             # per host. A crash mid-``install all`` therefore records no hosts,
             # rather than some: the deployed files of the completed hosts are
@@ -1421,7 +1438,7 @@ def _uninstall_provider_on_host(provider_key: str, host: str) -> int:
                 return 0
             entry = installs.get(host)
             if host_providers(installs, host):
-                _splice_region_into_deployed(installs, host)
+                _rerender_deployed_skill(installs, host)
             elif isinstance(entry, dict) and isinstance(entry.get("files"), list):
                 # That was the last provider: purge the deployed skill and drop
                 # the host's manifest entry entirely.
@@ -1458,7 +1475,7 @@ def _uninstall_default_on_host(mode: str, host: str) -> int:
     try:
         with manifest_transaction(delete_when_empty=True) as installs:
             if clear_host_mode(installs, host, mode):
-                _splice_region_into_deployed(installs, host)
+                _rerender_deployed_skill(installs, host)
                 print(f"  removed: {mode} assignment on {host}")
             else:
                 print(f"note: no provider assigned to mode {mode!r} on {host}")

@@ -55,18 +55,35 @@ SKILL_ANCHORS = (
     "--worktree",
     "resume",
     "--run-id",
-    # The worth-it self-check. A bare "spec" also matched three unrelated
-    # sentences, so deleting the check left the anchor satisfied.
-    "longer than the diff",
+    # The routing-is-a-mandate doctrine: `install ... for <mode>` is the user
+    # making the delegation decision once; per-task worth-it re-judgment is
+    # what let a routed explore be silently done in-session.
+    "not yours to remake",
     "background",
     "main session",
     "PILOT_RESULT",
 )
 
 
+MODES = ("explore", "code", "test", "review", "resume")
+
+
+def _skill_dir(host: str):
+    return INTEGRATIONS_DIR / host / "skills" / "pilot-workers"
+
+
+def _skill_tree_text(host: str) -> str:
+    """Core SKILL.md plus every modes/*.md — doctrine that moved into a child
+    file still counts as present, but only if the file actually ships."""
+    parts = [(_skill_dir(host) / "SKILL.md").read_text(encoding="utf-8")]
+    parts += [p.read_text(encoding="utf-8")
+              for p in sorted(_skill_dir(host).glob("modes/*.md"))]
+    return "\n".join(parts)
+
+
 @pytest.mark.parametrize("host", ["claude-host", "codex-host"])
 def test_playbook_skill_present_and_non_stub(host):
-    path = INTEGRATIONS_DIR / host / "skills" / "pilot-workers" / "SKILL.md"
+    path = _skill_dir(host) / "SKILL.md"
     assert path.is_file(), f"missing playbook skill: {path}"
     raw = path.read_bytes()
     assert len(raw) > 4000, (
@@ -74,22 +91,61 @@ def test_playbook_skill_present_and_non_stub(host):
     )
     text = raw.decode("utf-8")
     lower = text.lower()
+    # Core anchors: doctrine every dispatch needs regardless of mode, so it
+    # must be in the always-loaded file, not a child.
     for anchor in SKILL_ANCHORS:
         assert anchor.lower() in lower, f"{path} missing doctrine anchor: {anchor!r}"
-    # Doctrine anchors with accepted spelling variants.
+    tree = _skill_tree_text(host).lower()
+    # Doctrine anchors with accepted spelling variants; these live in the
+    # per-mode files after the split, so they are asserted on the whole tree.
     # NOT "spot-check": sampling was removed on purpose. A sample of N of M
     # conclusions licenses nothing about the other M-N and manufactures
     # confidence in them. What must survive is verification of the set actually
     # acted on — review findings — plus checks that are cheap AND complete.
-    assert "verify every finding you intend to act on" in lower, (
-        f"{path} missing verify-before-acting doctrine"
+    assert "verify every finding you intend to act on" in tree, (
+        f"{host} missing verify-before-acting doctrine"
     )
-    assert "diff --stat" in lower, (
-        f"{path} missing the complete changed-file-set check"
+    assert "diff --stat" in tree, (
+        f"{host} missing the complete changed-file-set check"
     )
-    assert ("cross-model" in lower) or ("different provider" in lower), (
-        f"{path} missing cross-model review doctrine"
+    assert ("cross-model" in tree) or ("different provider" in tree), (
+        f"{host} missing cross-model review doctrine"
     )
+
+
+@pytest.mark.parametrize("host", ["claude-host", "codex-host"])
+def test_each_mode_has_a_pointed_at_child_file(host):
+    """Progressive disclosure: per-mode craft ships as modes/<mode>.md, and
+    the core file must point at each one — an unreferenced child is doctrine
+    the model will never know to read."""
+    core = (_skill_dir(host) / "SKILL.md").read_text(encoding="utf-8")
+    for mode in MODES:
+        child = _skill_dir(host) / "modes" / f"{mode}.md"
+        assert child.is_file(), f"{host}: missing modes/{mode}.md"
+        assert len(child.read_text(encoding="utf-8")) > 300, (
+            f"{host}: modes/{mode}.md is a stub")
+        assert f"modes/{mode}.md" in core or "modes/<mode>.md" in core, (
+            f"{host}: core never points at modes/{mode}.md")
+
+
+@pytest.mark.parametrize("host", ["claude-host", "codex-host"])
+def test_core_skill_carries_no_mode_sections(host):
+    """The split's whole point is loading less on trigger; a Mode section
+    left in (or creeping back into) the core file pays its cost on every
+    load while duplicating the child."""
+    core = (_skill_dir(host) / "SKILL.md").read_text(encoding="utf-8")
+    assert "## Mode:" not in core, f"{host}: a mode section is back in core"
+
+
+@pytest.mark.parametrize("host", ["claude-host", "codex-host"])
+def test_core_skill_maps_scenarios_to_modes(host):
+    """The scenario table: user phrasings AND the model's own mid-task
+    impulses mapped to modes, with the purpose (learn vs verify) boundary."""
+    core = " ".join((_skill_dir(host) / "SKILL.md")
+                    .read_text(encoding="utf-8").split())
+    assert "探索" in core, f"{host}: no Chinese exploration phrasing in core"
+    assert "by PURPOSE" in core, f"{host}: purpose boundary missing"
+    assert "file:line" in core, f"{host}: verify-locally example missing"
 
 
 def test_claude_skill_frontmatter_has_name():
@@ -176,7 +232,17 @@ def test_no_host_template_hardcodes_its_own_trigger_condition():
             f"{host}: the template lost its trigger placeholder")
         for phrase in ("Trigger when the user names",
                        "asks to delegate",
-                       "to a worker model —"):
+                       "to a worker model —",
+                       # The economics escape hatch: any worth-it language in
+                       # the frontmatter licenses the model to re-judge a
+                       # routed mode per task and do the work in-session,
+                       # which is exactly the failure the routing exists to
+                       # prevent. (The BODY may still say "worth delegating"
+                       # about UNROUTED modes — this guard reads only the
+                       # frontmatter.)
+                       "worth delegating",
+                       "worth handing",
+                       "Not for small tweaks"):
             if phrase in normalised:
                 offenders.append(f"{host}: still hardcodes {phrase!r}")
     assert not offenders, "; ".join(offenders)
