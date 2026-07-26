@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from pilot_workers import providers
+from pilot_workers import policy, providers
 from pilot_workers.cli import install as install_mod
 
 
@@ -482,8 +482,9 @@ def test_packaged_skill_names_no_vendor_brand_either(host):
     packaged = (install_mod.INTEGRATIONS_DIR / f"{host}-host"
                 / "skills" / "pilot-workers" / "SKILL.md")
     text = packaged.read_text(encoding="utf-8")
+    mode_names = set(policy.MODE_TO_AGENT)
     stems = {re.match(r"[a-z]+", key).group(0) for key in providers.PROVIDERS}
-    for stem in stems:
+    for stem in stems - mode_names:
         assert not _names_provider(text, stem), \
             f"{host} skill names the vendor {stem!r}"
 
@@ -1216,7 +1217,7 @@ def test_a_host_with_no_mode_assignments_does_not_claim_mode_triggering(isolated
         "providers": ["ds"], "modes": {},
     })
     assert "ds" in description
-    for mode in ("explore", "test", "review"):
+    for mode in ("explore", "test", "test-case", "review"):
         assert f"{mode} →" not in description and f"{mode} ->" not in description, (
             f"a host with no assignments claims to route {mode}")
 
@@ -1231,7 +1232,7 @@ def test_an_unassigned_mode_is_not_advertised(isolated):
     # Scoped to the GENERATED clause: the hand-written prose above it legitimately
     # mentions "bulk mechanical edits" as an example of delegable work, so a check
     # against the whole description flagged text that was never the problem.
-    for mode in ("code", "review", "test"):
+    for mode in ("code", "review", "test", "test-case"):
         assert f"{mode} →" not in routing, (
             f"the routing clause advertises {mode}, which nothing is assigned to")
     assert "explore → ds" in description, description

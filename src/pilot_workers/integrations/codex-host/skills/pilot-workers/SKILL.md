@@ -1,6 +1,6 @@
 ---
 name: pilot-workers
-description: Plan with Codex, then run bounded tasks (code, explore, test, review, resume) through isolated LLM workers via the pilot-workers CLI and verify their structured verdicts. Invoke explicitly as `$pilot-workers [code|explore|test|review|resume] [task]`. {{PILOT_PROVIDER_TRIGGERS}}
+description: Plan with Codex, then run bounded tasks (code, explore, test, test-case, review, resume) through isolated LLM workers via the pilot-workers CLI and verify their structured verdicts. Invoke explicitly as `$pilot-workers [code|explore|test|test-case|review|resume] [task]`. {{PILOT_PROVIDER_TRIGGERS}}
 ---
 
 # pilot-workers Playbook
@@ -21,6 +21,7 @@ the priority chain below.
 | "how does X work" / "trace this flow" / "探索、梳理、理解、读一下这块代码" — or YOU need to read code to build understanding before planning | explore |
 | "implement/fix/refactor X" / "改一下、实现、修复" — or the plan is settled and edits would begin | code |
 | "run the tests" / "跑一下测试" — or you want a suite run to verify a change | test |
+| "generate tests for X" / "写测试用例" — or you need test cases written for a module | test-case |
 | "review this change" / "review 一下这次改动" — or a rewrite-scale diff just landed | review |
 | a prior dispatch failed or stopped short | resume |
 
@@ -52,7 +53,14 @@ file:line, a returned diff, a verdict) is local reading and needs no worker.
    playbook you have not read in this session.
 2. `pilot-workers template <mode> > /tmp/<provider>-<mode>-<slug>-<timestamp>.md`,
    then fill in the template (unique filename — parallel sessions must not
-   collide). The task file must be **self-contained** and carry **never any
+   collide). **Every task file must settle three things before dispatch:**
+   (a) **Objective** — what the worker must deliver, stated as verifiable
+   outcomes. (b) **Interface and steps** — the entry points (file:line),
+   conventions to follow, and the approach to take; the worker must not
+   guess these. (c) **Boundaries** — what the worker must NOT do: files it
+   must not touch, patterns it must not use, scope it must not exceed; an
+   unlisted boundary is an invisible one.
+   The task file must be **self-contained** and carry **never any
    credentials** — it is sent verbatim to a third-party endpoint. Dispatch
    refuses obvious key shapes and any key configured on this machine, but that
    check **cannot catch every secret**: it is a backstop, not permission to paste
@@ -110,6 +118,35 @@ partial), `unavailable` (no block at all — the worker ignored the contract).
   (`crash|timeout|idle_timeout|interrupted`) + `stderr_tail`; `result` and
   `final_text_path` are null. Consume rule: read `reason` + `stderr_tail`
   only.
+
+## Parallel test-case + code workflow
+
+When both test-case and code are routed, run them in parallel and merge:
+
+1. **Dispatch both simultaneously** — test-case with `--worktree` (isolated
+   copy), code on the main workdir. Two background shells, both started
+   in the same turn.
+   ```bash
+   pilot-workers dispatch --provider <tc-key> --mode test-case --workdir "$PWD" --task-file <tc-task> --worktree &
+   pilot-workers dispatch --provider <code-key> --mode code --workdir "$PWD" --task-file <code-task> &
+   ```
+2. **Wait for both to complete.** Harvest each verdict independently.
+3. **Merge test-case into main.** The worktree path is in the
+   `worker_runner.started` JSON. Test files are new files; source changes are
+   in main — conflicts are rare.
+   ```bash
+   cd <worktree-path> && git add -A && git commit -m "test-case: <summary>"
+   cd "$PWD" && git merge <worktree-branch>   # or cherry-pick
+   ```
+4. **Dispatch test** on the merged tree — the tests were written by
+   test-case, the code was written by code, now verify them together.
+5. **Clean up** once test passes:
+   ```bash
+   pilot-workers maintain worktrees remove <worktree-path>
+   ```
+   If test fails, fix in the main session and re-run — the failure tells you
+   whether the interface changed (code's fault) or the test is wrong
+   (test-case's fault).
 
 <!--PILOT_GENERATED_BEGIN-->
 <!--PILOT_GENERATED_END-->

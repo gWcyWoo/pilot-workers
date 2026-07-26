@@ -75,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     if subcommand == "template":
         import pilot_workers
 
-        modes = ("code", "explore", "test", "review")
+        modes = ("code", "explore", "test", "test-case", "review")
         if rest and rest[0] in ("-h", "--help"):
             print(f"usage: pilot-workers template {{{'|'.join(modes)}}}")
             return 0

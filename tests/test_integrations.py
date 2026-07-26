@@ -65,7 +65,7 @@ SKILL_ANCHORS = (
 )
 
 
-MODES = ("explore", "code", "test", "review", "resume")
+MODES = ("explore", "code", "test", "test-case", "review", "resume")
 
 
 def _skill_dir(host: str):

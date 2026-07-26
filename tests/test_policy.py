@@ -24,6 +24,7 @@ def test_mode_to_agent_mapping():
         "code": "worker-code",
         "explore": "worker-explore",
         "test": "worker-test",
+        "test-case": "worker-test-case",
         "review": "worker-review",
         "resume": "worker-code",
     }
@@ -36,6 +37,7 @@ def test_steps_by_mode_values():
         "review": 120,
         "explore": 80,
         "test": 80,
+        "test-case": 120,
     }
 
 
@@ -287,7 +289,7 @@ CREDENTIAL_PATHS = [
 ]
 
 
-@pytest.mark.parametrize("mode", ["code", "explore", "test", "review", "resume"])
+@pytest.mark.parametrize("mode", ["code", "explore", "test", "test-case", "review", "resume"])
 @pytest.mark.parametrize("path", CREDENTIAL_PATHS)
 def test_no_mode_lets_the_read_or_edit_tool_open_a_credential_path(mode, path):
     """Enforced, not just configured: verified against a real worker.
@@ -303,7 +305,7 @@ def test_no_mode_lets_the_read_or_edit_tool_open_a_credential_path(mode, path):
             f"{mode}: {tool} may open {path}")
 
 
-@pytest.mark.parametrize("mode", ["code", "explore", "test", "review", "resume"])
+@pytest.mark.parametrize("mode", ["code", "explore", "test", "test-case", "review", "resume"])
 @pytest.mark.parametrize("path", CREDENTIAL_PATHS)
 def test_the_grep_deny_is_configured_but_is_NOT_a_boundary(mode, path):
     """We configure it; the engine does not enforce it. Do not read more into
@@ -325,7 +327,7 @@ def test_the_grep_deny_is_configured_but_is_NOT_a_boundary(mode, path):
         "and the guarantee documented in prompts/common.md must change together")
 
 
-@pytest.mark.parametrize("mode", ["code", "explore", "test", "review", "resume"])
+@pytest.mark.parametrize("mode", ["code", "explore", "test", "test-case", "review", "resume"])
 @pytest.mark.parametrize("path", ["src/app.py", "README.md", "tests/test_x.py"])
 def test_ordinary_files_stay_readable_in_every_mode(mode, path):
     """The denies must not cost the worker the files it exists to work on —
@@ -338,7 +340,7 @@ def test_ordinary_files_stay_readable_in_every_mode(mode, path):
 def test_only_code_and_resume_can_edit_at_all():
     for mode in ("explore", "review", "test"):
         assert agent_permissions(mode)["edit"] == "deny"
-    for mode in ("code", "resume"):
+    for mode in ("code", "test-case", "resume"):
         assert _tool_verdict(
             agent_permissions(mode)["edit"], "src/app.py") == "allow"
 
@@ -502,7 +504,7 @@ def test_a_profile_cannot_push_the_redirect_deny_off_the_end(mode):
     assert _resolve(merged["bash"], "jq . data.json") == "allow"
 
 
-@pytest.mark.parametrize("mode", ["review", "explore", "test", "code"])
+@pytest.mark.parametrize("mode", ["review", "explore", "test", "test-case", "code"])
 def test_a_profile_cannot_push_the_path_denies_off_the_end(mode):
     merged = _merge_permissions(
         policy.agent_permissions(mode), NEW_PATTERN_PROFILE, mode)

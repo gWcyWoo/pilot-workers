@@ -508,6 +508,7 @@ MODE_TRIGGER_EXAMPLES: dict[str, tuple[str, ...]] = {
     "code": ('"implement/fix/refactor X"', '"改一下/实现/修复"'),
     "test": ('"run the tests"', '"跑一下测试"'),
     "review": ('"review this change"', '"review 一下这次改动"'),
+    "test-case": ('"generate tests for X"', '"写测试用例"'),
 }
 
 

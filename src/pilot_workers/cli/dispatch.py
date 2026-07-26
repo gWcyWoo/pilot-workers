@@ -423,6 +423,7 @@ _RESULT_VALIDATORS = {
     "explore": _validate_explore_result,
     "code": _validate_code_result,
     "test": _validate_test_result,
+    "test-case": _validate_code_result,
     "review": _validate_review_result,
     "resume": _validate_code_result,
 }
