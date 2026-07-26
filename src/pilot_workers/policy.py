@@ -58,6 +58,14 @@ def load_prompt(mode: str) -> str:
     return "\n\n".join(parts)
 
 
+# Path-shaped denies. Unlike every other rule here these match anywhere in the
+# command rather than being anchored to a command name, so a later allow for an
+# UNRELATED command shadows them under last-match-wins. Named separately
+# because each mode that appends allows after the deny block has to put these
+# back last (see test_shell_permissions).
+CREDENTIAL_PATH_DENIES = ("*auth.json*", "*.env*")
+
+
 def denied_shell_patterns() -> dict[str, str]:
     return {
         "git push*": "deny",
@@ -80,8 +88,7 @@ def denied_shell_patterns() -> dict[str, str]:
         "rm -rf /*": "deny",
         "rm -rf ~*": "deny",
         "sudo *": "deny",
-        "*auth.json*": "deny",
-        "*.env*": "deny",
+        **{pattern: "deny" for pattern in CREDENTIAL_PATH_DENIES},
     }
 
 
@@ -180,10 +187,22 @@ def test_shell_permissions() -> dict[str, str]:
             "./gradlew test*": "allow",
         }
     )
-    rules.update(denied_shell_patterns())
-    # Re-append the redirect deny so it stays LAST: dict.update keeps an
-    # existing key's original position, which would otherwise let
-    # "pytest > file" resolve to the later "pytest*" allow.
+    # Re-append the PATH-shaped denies so they land after the runner allows.
+    # `dict.update` keeps an existing key's original position, so calling
+    # `denied_shell_patterns()` again here changed nothing at all — proven by
+    # comparing the result with and without it, values and order identical —
+    # while reading like a re-assertion of the denies. Without this, `pytest
+    # .env` and `npm run build config/auth.json` resolved to ALLOW in test
+    # mode, the one mode where those denies went inert; code and review both
+    # denied them.
+    #
+    # Only these two. Re-appending the whole deny set would move `python*`
+    # after `python -m pytest*` and break the deliberate override above.
+    for pattern in CREDENTIAL_PATH_DENIES:
+        del rules[pattern]
+        rules[pattern] = "deny"
+    # The redirect deny stays LAST of all, or "pytest > file" resolves to the
+    # earlier "pytest*" allow.
     del rules["*>*"]
     rules["*>*"] = "deny"
     return rules
@@ -195,6 +214,33 @@ def code_shell_permissions() -> dict[str, str]:
     return rules
 
 
+# The file tools that read project content by path, and therefore need the same
+# path denies bash has. Named so the profile merge can re-assert the floor
+# without re-deriving which tools it applies to.
+FILE_TOOLS = ("read", "edit", "grep")
+
+
+def file_tool_path_rules() -> dict[str, str]:
+    """Allow every path except the credential ones.
+
+    The native file tools need the SAME path denies as bash. Granting them a
+    bare "allow" made the shell's rules a facade: `cat .env` was refused while
+    the read tool opened the same file and returned its contents, and grep
+    returned the matching line — verified with a decoy .env in a throwaway
+    workdir. Every mode is affected, read-only ones included, and
+    prompts/common.md promises the opposite.
+    """
+    return {
+        "*": "allow",
+        **{pattern: "deny" for pattern in CREDENTIAL_PATH_DENIES},
+        # Kept alongside the broad `*.env*` rather than folded into it: the
+        # engine's file-tool matcher is not guaranteed to be the shell's, and
+        # these two anchor the common shapes explicitly.
+        "*.env": "deny",
+        "*.env.*": "deny",
+    }
+
+
 def agent_permissions(mode: str) -> dict[str, Any]:
     effective_mode = "code" if mode == "resume" else mode
     editable = effective_mode == "code"
@@ -204,12 +250,13 @@ def agent_permissions(mode: str) -> dict[str, Any]:
         bash = test_shell_permissions()
     else:
         bash = readonly_shell_permissions()
+    file_tool_rules = file_tool_path_rules()
     return {
         "*": "deny",
-        "read": "allow",
-        "edit": "allow" if editable else "deny",
+        "read": dict(file_tool_rules),
+        "edit": (dict(file_tool_rules) if editable else "deny"),
         "glob": "allow",
-        "grep": "allow",
+        "grep": dict(file_tool_rules),
         "list": "allow",
         "bash": bash,
         "task": "deny",
@@ -238,12 +285,35 @@ def load_permission_profile(name: str) -> dict[str, Any]:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise RuntimeError(f"permission profile must be a YAML mapping: {path}")
-    for key in data:
+    for key, section in data.items():
         if key != "_all" and key not in VALID_MODES:
             raise RuntimeError(
                 f"permission profile has unknown section '{key}' "
                 f"(expected _all or one of {VALID_MODES}): {path}"
             )
+        # Shape, not just name. `code: allow` was skipped in silence by the merge
+        # (it tests isinstance(section, dict) and moves on) and
+        # `code: {shell: allow}` raised AttributeError from inside it - a
+        # traceback for a typo in the operator's own config file.
+        if not isinstance(section, dict):
+            raise RuntimeError(
+                f"permission profile section '{key}' must be a mapping with "
+                f"'shell' and/or 'tools' keys, got "
+                f"{type(section).__name__}: {path}"
+            )
+        unknown = set(section) - {"shell", "tools"}
+        if unknown:
+            raise RuntimeError(
+                f"permission profile section '{key}' has unknown keys "
+                f"{sorted(unknown)} (expected shell, tools): {path}"
+            )
+        for field in ("shell", "tools"):
+            if field in section and not isinstance(section[field], dict):
+                raise RuntimeError(
+                    f"permission profile '{key}.{field}' must be a mapping of "
+                    f"pattern -> action, got "
+                    f"{type(section[field]).__name__}: {path}"
+                )
     return data
 
 
@@ -267,9 +337,16 @@ def _merge_permissions(
     if not sections:
         return base
 
-    result = dict(base)
+    # A SHALLOW copy shares every nested dict with the caller, and the file-tool
+    # floor below pops and re-inserts deny patterns in place — so merging a
+    # profile silently reordered the caller's own base map. Harmless today
+    # (agent_permissions returns a fresh dict per call) and a trap for the first
+    # caller that reuses one.
+    result = {key: (dict(value) if isinstance(value, dict) else value)
+              for key, value in base.items()}
     bash_rules = dict(result.get("bash", {}))
 
+    bash_overridden = False
     for section in sections:
         if not isinstance(section, dict):
             continue
@@ -277,7 +354,60 @@ def _merge_permissions(
             bash_rules[pattern] = action
         for tool, action in (section.get("tools") or {}).items():
             result[tool] = action
+            if tool == "bash":
+                bash_overridden = True
 
+    # Profile shell rules are APPENDED, so a pattern the base does not already
+    # have lands after the two ordering-sensitive denies that have to come last.
+    # With `"jq *": allow`, `jq . data.json > overwrite.json` resolved to allow
+    # in review mode — a write in a read-only mode, and `*>*` is documented at
+    # the top of this module as necessarily last. The bundled `relaxed` profile
+    # does NOT trip it: its patterns exist in the base, and dict assignment
+    # keeps an existing key's position — which is why reading it proved nothing.
+    #
+    # Judged on the EFFECTIVE value, not on whether the profile mentioned the
+    # pattern. Skipping every pattern the profile named was too broad: a profile
+    # that names `*.env*: deny` (agreeing with the floor) AND adds a new allow
+    # left the deny at its base position, where the new allow outranked it. A
+    # profile that widened it to `allow` is the deliberate override and shows up
+    # here as a non-deny value, which is the only case worth skipping.
+    for pattern in (*CREDENTIAL_PATH_DENIES, "*>*"):
+        if bash_rules.get(pattern) != "deny":
+            continue
+        del bash_rules[pattern]
+        bash_rules[pattern] = "deny"
+
+    # A profile widening a file TOOL must not discard that tool's PATH denies.
+    # `data/permissions/README.md` documents `explore: tools: edit: allow`, and
+    # taking it literally replaced the whole rule map with a bare "allow" —
+    # silently reopening the credential-path bypass, and making the promise in
+    # prompts/common.md false for that run.
+    #
+    # Widening a NAMED path pattern under `shell:` stays honoured: that is a
+    # deliberate act (it is how the bundled `relaxed` profile re-allows curl),
+    # not a side effect of asking for a capability. Tightening a tool to "deny"
+    # is likewise untouched.
+    for tool in FILE_TOOLS:
+        value = result.get(tool)
+        if value == "allow":
+            result[tool] = file_tool_path_rules()
+        elif isinstance(value, dict):
+            for pattern, action in file_tool_path_rules().items():
+                if action == "deny":
+                    value.pop(pattern, None)
+                    value[pattern] = action   # last-match-wins: denies go last
+
+    if bash_overridden:
+        # A profile named `bash` wholesale under `tools:` — `tools: {bash: deny}`
+        # to shut the shell off, or a dict mirroring OpenCode's own config shape.
+        # Overwriting it with the merged rule map was the worst of the three
+        # possible outcomes: the operator believes the shell is configured and it
+        # is not. Tracked with an explicit FLAG: the first version tested
+        # `isinstance(..., str)` and silently dropped a dict override; the second
+        # compared identity against the base value, which stopped working the
+        # moment the base stopped being shared by a shallow copy. A flag says what
+        # is meant and survives both.
+        return result
     result["bash"] = bash_rules
     return result
 

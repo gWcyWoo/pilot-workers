@@ -50,6 +50,7 @@ renders two kinds of input:
 from __future__ import annotations
 
 from datetime import datetime
+import os
 from pathlib import Path
 from typing import Any
 
@@ -152,7 +153,11 @@ def render_unified(ev: UnifiedEvent) -> list[str]:
         text = (ev.text or "").strip()
         if not text:
             return []
-        return [f"💬 {_trim(text, TEXT_LIMIT)}"]
+        # Indented like the reasoning branch: a worker's final text is routinely
+        # multi-line, and interpolating it raw put its later lines at column 0
+        # where a reader (and the archive slicer) cannot tell them from new
+        # records.
+        return ["💬", f"{INDENT}{_indent_multiline(text, TEXT_LIMIT)}"]
 
     # step / error / session: no dedicated rendered line today.
     return []
@@ -161,21 +166,33 @@ def render_unified(ev: UnifiedEvent) -> list[str]:
 class FmtWriter:
     """Append rendered lines to the fixed live log and slice a per-run archive."""
 
-    def __init__(self, logs_dir: Path, provider_key: str, run_id: str, pid: int) -> None:
+    def __init__(self, logs_dir: Path, provider_key: str, run_stem: str,
+                 pid: int) -> None:
+        # `run_stem`, not `run_id`: for a resumed attempt the caller passes
+        # `<sandbox>+<attempt>` so this archive carries the same prefix as the
+        # jsonl and the lifecycle tools can find it. The parameter was named
+        # run_id while receiving a stem, which is how three of the five per-run
+        # artifacts ended up outside the convention.
         self.logs_dir = logs_dir
         self.provider_key = provider_key
-        self.run_id = run_id
+        self.run_stem = run_stem
         self.pid = pid
         self.latest = logs_dir / "latest.log"
-        self.archive = logs_dir / f"rendered-{run_id}.log"
+        self.archive = logs_dir / f"rendered-{run_stem}.log"
         self._rotate_if_needed()
         self.latest.touch(mode=0o600, exist_ok=True)
         self._offset = self.latest.stat().st_size
 
     def _rotate_if_needed(self) -> None:
-        if self.latest.is_file() and self.latest.stat().st_size > ROTATE_BYTES:
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            self.latest.rename(self.logs_dir / f"rendered-rotated-{stamp}.log")
+        try:
+            if self.latest.is_file() and self.latest.stat().st_size > ROTATE_BYTES:
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                self.latest.rename(self.logs_dir / f"rendered-rotated-{stamp}.log")
+        except OSError:
+            # Concurrent same-provider runs both see an oversized latest.log and
+            # both try to rotate it; the loser must not lose its live rendering
+            # over a log-housekeeping detail someone else already did.
+            pass
 
     def write_lines(self, lines: list[str]) -> None:
         with self.latest.open("a", encoding="utf-8") as handle:
@@ -197,21 +214,34 @@ class FmtWriter:
 
     def finalize(self) -> None:
         with self.latest.open("rb") as handle:
-            handle.seek(self._offset)
+            # Another run of the same provider can have rotated latest.log since
+            # this writer captured its offset. Seeking past the end of the new
+            # file would archive nothing; start from the beginning instead.
+            if handle.seek(0, os.SEEK_END) < self._offset:
+                start = 0
+            else:
+                start = self._offset
+            handle.seek(start)
             payload = handle.read()
-        descriptor = self.archive.open("wb")
-        try:
-            descriptor.write(payload)
-        finally:
-            descriptor.close()
+        # 0600 from creation rather than chmod-after: the archive holds the
+        # worker's output and this project's paths, and a umask-wide window is
+        # a window.
+        descriptor = os.open(
+            self.archive, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
         self.archive.chmod(0o600)
         self._prune_archives()
 
     def _prune_archives(self) -> None:
+        def mtime(path: Path) -> float:
+            # A concurrent pruner may have unlinked it between glob and stat.
+            try:
+                return path.stat().st_mtime
+            except OSError:
+                return 0.0
+
         archives = sorted(
-            self.logs_dir.glob("rendered-*.log"),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )
+            self.logs_dir.glob("rendered-*.log"), key=mtime, reverse=True)
         for stale in archives[KEEP_ARCHIVES:]:
             stale.unlink(missing_ok=True)

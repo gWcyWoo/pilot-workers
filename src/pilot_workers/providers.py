@@ -27,9 +27,29 @@ MAX_TASK_BYTES = 512_000
 PROVIDERS_DIR = Path(__file__).resolve().parent / "data" / "providers"
 
 # Keys that collide with the install/uninstall CLI grammar
-# ('install <provider> on <host>', 'install runner <name>'); a provider
-# YAML using one of these would make the CLI ambiguous.
-RESERVED_PROVIDER_KEYS = frozenset({"runner", "all", "on", "claude", "codex"})
+# ('install <provider> on <host>', 'install runner <name>',
+# 'uninstall for <mode> on <host>'); a provider YAML using one of these
+# would make the CLI ambiguous.
+RESERVED_PROVIDER_KEYS = frozenset(
+    {"runner", "all", "on", "claude", "codex", "for", "key"}
+)
+
+# Hosts a worker can be configured for. Lives here beside the reserved keys it
+# feeds, so the install grammar and everything that quotes it share one list.
+HOSTS = ("claude", "codex")
+
+
+def credential_setup_hint(provider_key: str) -> str:
+    """The one sentence that tells a user how to supply a provider's API key.
+
+    One copy: it names install grammar and host names, and it was previously
+    written out in three places (the isolation layer, the fanout preflight and
+    the host skills), which is three places to drift.
+    """
+    first, *rest = HOSTS
+    alternatives = "".join(f" (or 'on {host}')" for host in rest[:1])
+    return (f"run: pilot-workers install {provider_key} on {first} "
+            f"--global-key{alternatives}")
 
 
 @dataclass(frozen=True)
@@ -55,9 +75,44 @@ class Provider:
         return f"{self.provider_id}/{self.model_id}"
 
 
+def _fallback_scalar(raw: str, path: Path, line: str) -> str:
+    """Read one flat scalar the way PyYAML reads it.
+
+    ``pyyaml`` is optional, so the same file must yield the same provider with
+    or without it. Two rules are enough for these flat files, and both matter
+    for the template ``data/providers/README.md`` tells an author to copy —
+    every one of its seven fields carries a trailing ``# comment``:
+
+    - a leading quote ends the scalar at its closing quote; the rest is comment
+    - otherwise a ``#`` preceded by whitespace starts a comment (``glm#5``
+      keeps its hash, ``model #1`` does not)
+
+    An unterminated quote is a ScannerError to pyyaml, so it is an error here
+    too: keeping ``"myprov`` as a provider key — which is then used verbatim as
+    a directory name — is exactly the silent corruption these rules remove.
+    """
+    value = raw.strip()
+    if value[:1] in ('"', "'"):
+        quote = value[0]
+        end = value.find(quote, 1)
+        if end == -1:
+            raise RuntimeError(
+                f"provider {path.name}: unterminated quote in line: {line.strip()}"
+            )
+        return value[1:end]
+    for index, char in enumerate(value):
+        if char == "#" and index > 0 and value[index - 1] in " \t":
+            return value[:index].rstrip()
+    return value
+
+
 def _parse_yaml(path: Path) -> dict[str, Any]:
     """Parse a YAML file, with a stdlib fallback for simple flat files."""
-    text = path.read_text(encoding="utf-8")
+    # utf-8-sig: pyyaml strips a leading BOM, the fallback did not, so an editor
+    # that saves with one turned the first key into "﻿key" and the file
+    # failed as "missing fields: key" — another way for the two parsers to read
+    # one file differently.
+    text = path.read_text(encoding="utf-8-sig")
     if yaml is not None:
         result = yaml.safe_load(text)
         if not isinstance(result, dict):
@@ -66,13 +121,15 @@ def _parse_yaml(path: Path) -> dict[str, Any]:
     # Minimal fallback: flat key: value files without nesting.
     result: dict[str, Any] = {}
     for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
             continue
-        if ":" not in line:
+        if ":" not in stripped:
             continue
-        key, _, value = line.partition(":")
-        value = value.strip()
+        key, _, value = stripped.partition(":")
+        # Comments and quotes come off BEFORE the numeric check: pyyaml reads
+        # `context_tokens: 128000   # max context window` as the int 128000.
+        value = _fallback_scalar(value, path, line)
         if value.isdigit():
             result[key.strip()] = int(value)
         else:

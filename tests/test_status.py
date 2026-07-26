@@ -33,7 +33,7 @@ def _write_v3_manifest(installs: dict) -> None:
     path = providers.pilot_home() / "install-manifest.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
-        "schema_version": 3,
+        "schema_version": 4,
         "installs": installs,
     }), encoding="utf-8")
 
@@ -85,7 +85,7 @@ def test_json_shape(isolated, capsys):
     # Installs are reported host-level.
     assert "installs" in data
     for host in data["installs"]:
-        assert host in ("claude", "codex")
+        assert host in providers.HOSTS  # not a hardcoded pair
 
 
 # ----------------------------------------------------------------------
@@ -119,7 +119,7 @@ def test_json_installs_keyed_by_host_only(isolated, capsys):
     data = json.loads(capsys.readouterr().out)
     assert "claude" in data["installs"]
     for host, info in data["installs"].items():
-        assert host in ("claude", "codex")
+        assert host in providers.HOSTS  # not a hardcoded pair
         # No provider nesting under a host entry.
         for key in ("glm", "kimi-k3", "ds", "__all__"):
             assert key not in info

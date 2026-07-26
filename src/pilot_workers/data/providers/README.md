@@ -17,8 +17,11 @@ output_tokens: <int>                # max output tokens
 ```
 
 Then:
-1. Run `pilot-workers credentials <key>` to set up credentials.
+1. Run `pilot-workers install <key> on <host> --global-key` to set up credentials.
 2. Run `pilot-workers run --provider <key> --mode explore --workdir . --task "hello" --dry-run` to verify routing.
-3. Add the provider to your host integration (Codex SKILL.md / Claude agent+command).
+3. Run `pilot-workers install <key> on <host> [for <mode>]` for every host that should
+   see it. Never hand-edit a deployed `SKILL.md`: its worker table and frontmatter are
+   regenerated from the manifest on the next install or uninstall, so edits inside the
+   generated region are lost.
 
 The runner discovers all `.yaml` files in this directory at startup. No Python code changes needed.

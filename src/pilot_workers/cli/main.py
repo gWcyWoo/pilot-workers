@@ -14,15 +14,26 @@ subcommands:
   dispatch     Deterministic outer shell around run (started + verdict JSON).
   fanout       Dispatch several jobs concurrently; stdout = one JSON array of verdicts.
   template     Print the task template for a mode (code|explore|test|review).
-  install      install <host|all> [--target <dir>] | install runner <name>.
-  uninstall    uninstall <host|all> | uninstall runner <name>.
-  status       Show provider credential/install and runner status [--json].
-  credentials  Configure isolated worker credentials.
-  maintain     Worker log and worktree lifecycle tools.
+  install      Configure a worker for a host, or deploy/refresh a host's skill.
+  uninstall    Remove a worker from a host, an assignment, or a whole host.
+  status       Provider API keys, per-host workers, runner state [--json].
+  maintain     Worker log, sandbox and worktree lifecycle tools.
   runtime      Deprecated alias for 'install runner opencode'.
 
-v0.5.0 host-level grammar; '<provider|all> on <host|all>' is no longer
-accepted.
+install forms:
+  install <provider> on <host> [for <mode>] [--global-key]
+  install <host|all> [--target <dir>]
+  install runner <name>
+
+uninstall forms:
+  uninstall <provider> on <host>
+  uninstall for <mode> on <host>
+  uninstall key <provider>
+  uninstall <host|all>
+  uninstall runner <name>
+
+A host's skill exists only where at least one provider is configured for it; a
+mode with no provider assigned stays with this session.
 
 Use 'pilot-workers <subcommand> --help' for subcommand-specific help.
 """
@@ -65,6 +76,9 @@ def main(argv: list[str] | None = None) -> int:
         import pilot_workers
 
         modes = ("code", "explore", "test", "review")
+        if rest and rest[0] in ("-h", "--help"):
+            print(f"usage: pilot-workers template {{{'|'.join(modes)}}}")
+            return 0
         if len(rest) != 1 or rest[0] not in modes:
             print(f"usage: pilot-workers template {{{'|'.join(modes)}}}", file=sys.stderr)
             return 2
@@ -96,11 +110,6 @@ def main(argv: list[str] | None = None) -> int:
         from pilot_workers.cli.status import main as status_main
 
         return status_main(rest)
-
-    if subcommand == "credentials":
-        from pilot_workers.credentials import main as credentials_main
-
-        return _with_argv("pilot-workers credentials", rest, credentials_main)
 
     if subcommand == "maintain":
         from pilot_workers.maintain import main as maintain_main

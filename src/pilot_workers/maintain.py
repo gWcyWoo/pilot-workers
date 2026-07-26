@@ -22,7 +22,36 @@ import time
 from pilot_workers import providers, runtime
 
 
-def _run_pairs(logs_dir: Path) -> list[list[Path]]:
+def _mtime(path: Path) -> float:
+    """Modification time, or 0.0 if the file is already gone.
+
+    Two documented commands delete the same log files — ``maintain runs`` reaps
+    a sandbox and then that run's logs, ``maintain logs`` reaps logs by age — so
+    a cron sweep overlapping a manual one finds paths disappearing under it.
+    """
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _delete(path: Path) -> int:
+    """Delete one artifact, tolerating a concurrent sweep that got there first.
+
+    Returns 1 if this call did the deleting, 0 if it was already gone. Without
+    this an overlapping sweep raised FileNotFoundError out of the middle of the
+    walk and abandoned the rest of the tree: measured at 10 of 12 files left on
+    disk, reported as a bare errno line.
+    """
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return 0
+    print(f"delete {path}")
+    return 1
+
+
+def _run_pairs(logs_dir: Path) -> list[tuple[str, list[Path]]]:
     """Group per-run files (jsonl + stderr + rendered archive + verdict) by run id, newest first."""
     groups: dict[str, list[Path]] = {}
     for path in logs_dir.iterdir():
@@ -46,8 +75,8 @@ def _run_pairs(logs_dir: Path) -> list[list[Path]]:
             continue
         groups.setdefault(run_id, []).append(path)
     ordered = sorted(
-        groups.values(),
-        key=lambda paths: max(item.stat().st_mtime for item in paths),
+        groups.items(),
+        key=lambda pair: max(_mtime(item) for item in pair[1]),
         reverse=True,
     )
     return ordered
@@ -64,16 +93,41 @@ def cleanup_logs(older_than_days: int, provider_keys: list[str]) -> int:
             print(f"{key}: no log directory, skipping")
             continue
         pairs = _run_pairs(logs_dir)
-        for index, paths in enumerate(pairs):
-            newest_mtime = max(item.stat().st_mtime for item in paths)
+        for index, (run_id, paths) in enumerate(pairs):
+            newest_mtime = max(_mtime(item) for item in paths)
             if index == 0:
                 continue  # always keep the newest run for diagnosis
             if newest_mtime >= cutoff:
                 continue
+            # Age alone does not prove the run is over: a long-timeout run can
+            # go silent past the cutoff while run_process still holds these
+            # files open. A live run lock in the run's sandbox vetoes deletion.
+            #
+            # Read AND delete under the sandbox's guard: reading the lock and
+            # then acting on the answer is two steps, and a resume landing
+            # between them had the log files of its now-live run deleted. The
+            # guard, not the run lock — this caller does not destroy the
+            # sandbox, so it must not leave a .lock behind in one that survives.
+            # A resumed run's logs are named "<sandbox_id>+<attempt_id>" (see
+            # cli/run.py): it mints a fresh run_id for its own log files because
+            # open_private_text is O_CREAT|O_EXCL, while its lock stays in the
+            # ORIGINAL sandbox. Deriving the sandbox from the whole stem meant
+            # the live-run veto could never find a resumed run's sandbox and
+            # deleted its logs mid-run. '+' cannot occur in a run id.
+            sandbox_root = providers.run_paths(
+                providers.PROVIDERS[key], run_id.split("+", 1)[0])["root"]
+            if sandbox_root.is_dir():
+                with runtime.run_guard_held(sandbox_root):
+                    lock = runtime.read_run_lock(sandbox_root)
+                    if lock is not None and not runtime.lock_is_stale(lock):
+                        print(f"{key}: {run_id} skipping logs (live run)")
+                        continue
+                    for path in sorted(paths):
+                        removed += _delete(path)
+                continue
+            # No sandbox left to guard: the run is long over.
             for path in sorted(paths):
-                print(f"delete {path}")
-                path.unlink()
-                removed += 1
+                removed += _delete(path)
     print(f"removed {removed} file(s)")
     return 0
 
@@ -108,6 +162,13 @@ def _reap_sandbox(root: Path) -> int:
     print(f"delete {root}")
     root.rmdir()
     removed += 1
+    # The lock guard lives beside the sandbox, not in it (see
+    # runtime.run_guard_path), so it needs removing here or guards accumulate
+    # in runs_root forever.
+    # Through _delete like every other removal here: is_file()-then-unlink is
+    # the same check-then-act the rest of this module stopped doing, and the
+    # ownerless-guard sweep in cleanup_runs can win the race between the two.
+    removed += _delete(runtime.run_guard_path(root))
     return removed
 
 
@@ -121,7 +182,14 @@ def _run_log_files(provider: providers.Provider, run_id: str) -> list[Path]:
         f"{run_id}.verdict.json",
         f"{run_id}.report.md",
     ]
-    return [logs_dir / name for name in names if (logs_dir / name).is_file()]
+    found = [logs_dir / name for name in names if (logs_dir / name).is_file()]
+    # Resumed attempts of THIS sandbox are named "<run_id>+<attempt>"; without
+    # them the reaper removes the sandbox and orphans the resume's logs.
+    if logs_dir.is_dir():
+        found += sorted(p for p in logs_dir.glob(f"{run_id}+*") if p.is_file())
+        found += sorted(p for p in logs_dir.glob(f"rendered-{run_id}+*")
+                        if p.is_file())
+    return found
 
 
 def cleanup_runs(older_than_days: int, provider_keys: list[str], keep: int = 1) -> int:
@@ -144,23 +212,51 @@ def cleanup_runs(older_than_days: int, provider_keys: list[str], keep: int = 1) 
         sandboxes = sorted(
             (entry for entry in sandboxes_root.iterdir()
              if entry.is_dir() and not entry.is_symlink()),
-            key=lambda entry: entry.stat().st_mtime,
+            key=_mtime,
             reverse=True,
         )
         for index, sandbox in enumerate(sandboxes):
             if index < keep:
                 continue
-            if sandbox.stat().st_mtime >= cutoff:
+            # Both reads go through _mtime. The is_dir() filter above protects
+            # only a sandbox that vanishes BEFORE the listing; one reaped by a
+            # concurrent sweep after it still aborted the whole sweep here — one
+            # line below the read a test had already pinned as safe.
+            mtime = _mtime(sandbox)
+            if mtime == 0.0 and not sandbox.is_dir():
                 continue
-            lock = runtime.read_run_lock(sandbox)
-            if lock is not None and not runtime.lock_is_stale(lock):
-                print(f"{key}: {sandbox.name} skipping (live)")
+            if mtime >= cutoff:
                 continue
-            removed += _reap_sandbox(sandbox)
+            # Acquire the run lock rather than merely reading it: a resume can
+            # re-lock a stale sandbox between a read-only staleness check and
+            # the reap, and would then have its live sandbox deleted under it.
+            # Holding the lock makes it the single arbiter for both sides; the
+            # reap removes the whole tree, lock included, so no release step.
+            try:
+                # The lock must be HELD across the whole reap, not merely taken:
+                # _reap_sandbox deletes `.lock` early in its walk, and from that
+                # moment a resume could acquire the sandbox being deleted.
+                # OSError is caught too — a concurrent cleanup can reap this
+                # sandbox between iterdir and here, and one such race must not
+                # abort the rest of the sweep.
+                with runtime.run_lock_held(sandbox):
+                    removed += _reap_sandbox(sandbox)
+            except (OSError, RuntimeError) as exc:
+                print(f"{key}: {sandbox.name} skipping (not reapable: {exc})")
+                continue
+            # Outside the run lock — the sandbox and its lock are gone by now —
+            # so a concurrent `maintain logs` can own these paths already.
             for log_path in _run_log_files(provider, run_id=sandbox.name):
-                print(f"delete {log_path}")
-                log_path.unlink()
-                removed += 1
+                removed += _delete(log_path)
+        # A lock guard outlives its sandbox whenever the sandbox never became a
+        # directory — a provision that failed after the lock attempt leaves one
+        # behind, and the sweep above only walks directories, so nothing would
+        # ever collect it. Zero-byte files, but an unbounded set of them.
+        for guard in sandboxes_root.glob(".*.lock.guard"):
+            owner = sandboxes_root / guard.name[1:-len(".lock.guard")]
+            if owner.is_dir():
+                continue
+            removed += _delete(guard)
     print(f"removed {removed} file(s)")
     return 0
 
@@ -181,7 +277,16 @@ def worktree_status(path: Path) -> dict:
     head_result = _git(path, "rev-parse", "HEAD")
     if head_result.returncode == 0:
         head = head_result.stdout.strip()
-    reachable = _git(path, "rev-list", "HEAD", "--not", "--all")
+    # `--not --all` can NEVER report anything here: git includes every
+    # worktree's own HEAD in `--all`, so HEAD excludes itself and the answer is
+    # always empty — the refusal below could not fire, and a detached worktree
+    # holding the worker's only copy of a commit was removed without complaint.
+    # Verified: with a commit made in a detached worktree, `--not --all` prints
+    # 0 lines both inside the worktree and from the main repo, while
+    # `--not --branches --tags --remotes` prints 1; after the commit is put on a
+    # branch it prints 0 again.
+    reachable = _git(path, "rev-list", "HEAD",
+                     "--not", "--branches", "--tags", "--remotes")
     if reachable.returncode == 0:
         unintegrated = bool(reachable.stdout.strip())
     return {
@@ -189,7 +294,12 @@ def worktree_status(path: Path) -> dict:
         "head": head,
         "dirty": dirty,
         "unintegrated_commits": unintegrated,
-        "age_days": round((time.time() - path.stat().st_mtime) / 86400, 1),
+        # Through _mtime, and None when the worktree is already gone: a
+        # concurrent removal between the listing and this read otherwise
+        # aborted `maintain worktrees list` with a bare errno. None is
+        # this function's own convention for "could not determine".
+        "age_days": (round((time.time() - mtime) / 86400, 1)
+                     if (mtime := _mtime(path)) else None),
     }
 
 
