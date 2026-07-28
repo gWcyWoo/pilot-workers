@@ -1461,13 +1461,20 @@ def _uninstall_default_on_host(mode: str, host: str) -> int:
     regenerated so the mode is no longer listed as defaulted.
     """
     if mode not in _assignable_modes():
-        # A typo used to print "no provider assigned to mode 'cod'" and exit 0,
-        # which reads as "done" — the assignment the user meant to remove is
-        # still there. The addition direction has always validated the mode.
-        print(f"error: unknown mode: {mode} "
-              f"(expected one of {', '.join(_assignable_modes())})",
-              file=sys.stderr)
-        return 2
+        # The mode may have been removed from the registry after it was
+        # recorded in the manifest. Removal must still work — check
+        # whether the manifest actually has this mode before rejecting.
+        manifest_path = _manifest_path()
+        has_stale = False
+        if manifest_path.exists():
+            data = _load_manifest(manifest_path)
+            entry = data.get("installs", {}).get(host, {})
+            has_stale = mode in entry.get("modes", {})
+        if not has_stale:
+            print(f"error: unknown mode: {mode} "
+                  f"(expected one of {', '.join(_assignable_modes())})",
+                  file=sys.stderr)
+            return 2
     manifest_path = _manifest_path()
     if not manifest_path.exists():
         print(f"error: no install manifest found at {manifest_path}", file=sys.stderr)
