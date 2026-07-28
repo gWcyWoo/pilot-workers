@@ -36,11 +36,6 @@ holds the craft for this one mode.)
   dispatch a *different* provider in review mode before verifying — the two
   models' errors are uncorrelated, so the second catches the first's
   systematic blind spots at cheap quota. Skip for small changes.
-- **When test-case is also routed**, dispatch both in the same turn: code on
-  the main workdir, test-case with `--worktree`. They run in parallel.
-  Code's validation is regression verification (ALL GREEN). After merge
-  the main session validates the combined result as the final step. See
-  "Parallel test-case + code workflow" in the core SKILL.md.
 - Do not edit a worker's target files while it is running. Deletion,
   migration, CI/keys/production config changes: do not dispatch; a human does
   those.

@@ -65,7 +65,7 @@ SKILL_ANCHORS = (
 )
 
 
-MODES = ("explore", "code", "test", "test-case", "review", "resume")
+MODES = ("explore", "code", "test", "review", "resume")
 
 
 def _skill_dir(host: str):
@@ -248,39 +248,3 @@ def test_no_host_template_hardcodes_its_own_trigger_condition():
     assert not offenders, "; ".join(offenders)
 
 
-# ----------------------------------------------------------------------
-# test-case routing guard — the classification must live in SKILL.md
-# (where routing decisions are made), not only in modes/test-case.md
-# (read AFTER the decision). Without this, the planner can split a
-# cohesive request into per-test dispatches before ever seeing the rule.
-# ----------------------------------------------------------------------
-
-@pytest.mark.parametrize("host", ["claude-host", "codex-host"])
-def test_testcase_routing_classification_in_core_skill(host):
-    """The routing classification (batch-only, not per-test, not implement+test)
-    must appear in the core SKILL.md where mode selection happens."""
-    core = (_skill_dir(host) / "SKILL.md").read_text(encoding="utf-8")
-    assert "routing classification" in core.lower(), (
-        f"{host}: SKILL.md missing test-case routing classification paragraph"
-    )
-    normalised = " ".join(core.split())
-    assert "never dispatch test-case once per individual test" in normalised, (
-        f"{host}: SKILL.md missing the per-test-dispatch prohibition"
-    )
-    assert "routes to `code`" in normalised or "routes to code" in normalised, (
-        f"{host}: SKILL.md missing implement+test -> code routing rule"
-    )
-
-
-@pytest.mark.parametrize("host", ["claude-host", "codex-host"])
-def test_testcase_playbook_all_red_and_batch(host):
-    """modes/test-case.md must carry the ALL RED contract and the batch-not-TDD
-    rule — the worker reads this before writing its task file."""
-    tc = (_skill_dir(host) / "modes" / "test-case.md").read_text(encoding="utf-8")
-    normalised = " ".join(tc.split())
-    assert "ALL RED" in tc, (
-        f"{host}: modes/test-case.md missing ALL RED contract"
-    )
-    assert "batch test generation, not vertical-slice TDD" in normalised, (
-        f"{host}: modes/test-case.md missing batch-not-TDD rule"
-    )

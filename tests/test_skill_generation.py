@@ -1217,7 +1217,7 @@ def test_a_host_with_no_mode_assignments_does_not_claim_mode_triggering(isolated
         "providers": ["ds"], "modes": {},
     })
     assert "ds" in description
-    for mode in ("explore", "test", "test-case", "review"):
+    for mode in ("explore", "test", "review"):
         assert f"{mode} →" not in description and f"{mode} ->" not in description, (
             f"a host with no assignments claims to route {mode}")
 
@@ -1232,7 +1232,7 @@ def test_an_unassigned_mode_is_not_advertised(isolated):
     # Scoped to the GENERATED clause: the hand-written prose above it legitimately
     # mentions "bulk mechanical edits" as an example of delegable work, so a check
     # against the whole description flagged text that was never the problem.
-    for mode in ("code", "review", "test", "test-case"):
+    for mode in ("code", "review", "test"):
         assert f"{mode} →" not in routing, (
             f"the routing clause advertises {mode}, which nothing is assigned to")
     assert "explore → ds" in description, description

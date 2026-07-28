@@ -172,7 +172,7 @@ def test_run_accepts_a_clean_task(tmp_path, capsys):
 # ----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("mode", ["code", "explore", "test", "test-case", "review"])
+@pytest.mark.parametrize("mode", ["code", "explore", "test", "review"])
 def test_filled_template_passes_the_guard(mode):
     """Keeping the header while filling the sections must not be refused.
 
@@ -191,7 +191,7 @@ def test_filled_template_passes_the_guard(mode):
                          known_secrets=[])
 
 
-@pytest.mark.parametrize("mode", ["code", "explore", "test", "test-case", "review"])
+@pytest.mark.parametrize("mode", ["code", "explore", "test", "review"])
 def test_unfilled_template_is_still_refused(mode):
     """The whole point: dispatching the raw template must fail."""
     import pilot_workers
@@ -203,7 +203,7 @@ def test_unfilled_template_is_still_refused(mode):
         taskguard.check_task(template, known_secrets=[])
 
 
-@pytest.mark.parametrize("mode", ["code", "explore", "test", "test-case", "review"])
+@pytest.mark.parametrize("mode", ["code", "explore", "test", "review"])
 def test_template_no_longer_repeats_worker_side_discipline(mode):
     """Those lines live in prompts/*.md, which dispatch injects. A second copy
     in the template is paid for by the main session and drifts."""
@@ -361,7 +361,7 @@ def test_a_real_unfilled_placeholder_is_still_refused():
         taskguard.check_task(task, known_secrets=[])
 
 
-@pytest.mark.parametrize("mode", ["code", "explore", "test", "test-case", "review"])
+@pytest.mark.parametrize("mode", ["code", "explore", "test", "review"])
 def test_every_packaged_template_is_still_refused_raw(mode):
     import pilot_workers
 
@@ -376,7 +376,7 @@ def test_every_packaged_template_is_still_refused_raw(mode):
 # ----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("mode", ["explore", "review", "test", "test-case", "code"])
+@pytest.mark.parametrize("mode", ["explore", "review", "test", "code"])
 def test_template_does_not_restate_injected_output_rules(mode):
     """`prompts/<mode>.md` is injected into the worker at no cost to the planner.
     A template section repeating those rules is paid for by the planner, who
@@ -405,7 +405,7 @@ def _instruction_lines(text: str) -> set[str]:
     return lines
 
 
-@pytest.mark.parametrize("mode", ["code", "explore", "test", "test-case", "review"])
+@pytest.mark.parametrize("mode", ["code", "explore", "test", "review"])
 def test_no_instruction_line_is_duplicated_between_template_and_prompt(mode):
     """The phrase pins above only catch the wordings we already deleted.
 
@@ -427,7 +427,7 @@ def test_no_instruction_line_is_duplicated_between_template_and_prompt(mode):
         f"{sorted(template & injected)}")
 
 
-@pytest.mark.parametrize("mode", ["explore", "review", "test", "test-case", "code"])
+@pytest.mark.parametrize("mode", ["explore", "review", "test", "code"])
 def test_the_injected_prompt_still_carries_those_rules(mode):
     """Deleting from the template only helps if the rules survive elsewhere."""
     import pilot_workers

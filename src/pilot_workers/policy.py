@@ -29,18 +29,17 @@ from pilot_workers.providers import Provider
 
 PERMISSIONS_DIR = Path(__file__).resolve().parent / "data" / "permissions"
 
-VALID_MODES = ("code", "explore", "test", "test-case", "review")
+VALID_MODES = ("code", "explore", "test", "review")
 
 MODE_TO_AGENT = {
     "code": "worker-code",
     "explore": "worker-explore",
     "test": "worker-test",
-    "test-case": "worker-test-case",
     "review": "worker-review",
     "resume": "worker-code",
 }
 
-STEPS_BY_MODE = {"code": 120, "resume": 120, "review": 120, "explore": 80, "test": 80, "test-case": 120}
+STEPS_BY_MODE = {"code": 120, "resume": 120, "review": 120, "explore": 80, "test": 80}
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
@@ -244,8 +243,8 @@ def file_tool_path_rules() -> dict[str, str]:
 
 def agent_permissions(mode: str) -> dict[str, Any]:
     effective_mode = "code" if mode == "resume" else mode
-    editable = effective_mode in ("code", "test-case")
-    if effective_mode in ("code", "test-case"):
+    editable = effective_mode == "code"
+    if effective_mode == "code":
         bash = code_shell_permissions()
     elif effective_mode == "test":
         bash = test_shell_permissions()

@@ -1,22 +1,22 @@
 ---
 name: pilot-workers
-description: Executor layer — every time you are about to write code, write test cases, run tests, explore code, or review a diff, check here FIRST. If a provider is assigned for that kind of work, it MUST execute it — not you. This does not change your workflow, task decomposition, or verification strategy; it only replaces WHO executes each step. Invoke explicitly as `$pilot-workers [code|explore|test|test-case|review|resume] [task]`. {{PILOT_PROVIDER_TRIGGERS}}
+description: Executor layer — every time you are about to write code, run tests, explore code, or review a diff, check here FIRST. If a provider is assigned for that kind of work, it MUST execute it — not you. This does not change your workflow, task decomposition, or verification strategy; it only replaces WHO executes each step. Invoke explicitly as `$pilot-workers [code|explore|test|review|resume] [task]`. {{PILOT_PROVIDER_TRIGGERS}}
 ---
 
 # pilot-workers Playbook
 
 Parse the first word after `$pilot-workers` as the mode
-(`code`/`explore`/`test`/`test-case`/`review`/`resume`); otherwise default to
-`code` and treat all text as the task. Workers are separate OpenCode processes
-that **cannot see this conversation**.
+(`code`/`explore`/`test`/`review`/`resume`); otherwise default to `code` and
+treat all text as the task. Workers are separate OpenCode processes that
+**cannot see this conversation**.
 
 **pilot-workers is an executor layer, not a workflow layer.** Your workflow
 (TDD or not, what order, how to verify, task decomposition) is unchanged.
 The ONLY thing pilot-workers changes is WHO executes each step: before you
-write code — check if code has an assigned provider; before you write test
-cases — check if test-case has one; before you run tests, explore, or
-review — same check. If a provider is assigned, dispatch to it. If not, do
-it yourself. This is the entire contract. Workers get only settled decisions.
+write code — check if code has an assigned provider; before you run tests —
+check if test has one; before you explore or review — same check. If a
+provider is assigned, dispatch to it. If not, do it yourself. This is the
+entire contract. Workers get only settled decisions.
 
 ## When this skill applies
 
@@ -28,7 +28,6 @@ the priority chain below.
 | "how does X work" / "trace this flow" / "探索、梳理、理解、读一下这块代码" — or YOU need to read code to build understanding before planning | explore |
 | "implement/fix/refactor X" / "改一下、实现、修复" — or the plan is settled and edits would begin | code |
 | "run the tests" / "跑一下测试" — or you want a suite run to verify a change | test |
-| "generate tests for X" / "写测试用例" — or you need test cases written for a module | test-case |
 | "review this change" / "review 一下这次改动" — or a rewrite-scale diff just landed | review |
 | a prior dispatch failed or stopped short | resume |
 
@@ -36,13 +35,6 @@ The self-initiated rows draw the line by PURPOSE, never by size: reading to
 LEARN (trace a flow, understand a module, gather context for a change) is an
 explore dispatch no matter how few files; verifying a KNOWN location (a cited
 file:line, a returned diff, a verdict) is local reading and needs no worker.
-
-**test-case routing classification.** A request that bundles production code +
-tests ("implement X with tests") routes to `code` — the tests will pass after
-the code change, which violates test-case's ALL RED contract. `test-case` is
-standalone batch test generation against behavior that does not exist yet. One
-dispatch covers a cohesive unit; never dispatch test-case once per individual
-test — that is vertical-slice TDD and stays in this session.
 
 ## Quick Reference
 
@@ -132,37 +124,6 @@ partial), `unavailable` (no block at all — the worker ignored the contract).
   (`crash|timeout|idle_timeout|interrupted`) + `stderr_tail`; `result` and
   `final_text_path` are null. Consume rule: read `reason` + `stderr_tail`
   only.
-
-## Dispatching test-case and code together
-
-When both test-case and code are routed, dispatch both in parallel.
-The main session decides WHETHER to use test-case; once both are needed,
-the parallel mechanics below apply.
-
-1. **Dispatch both simultaneously** — test-case with `--worktree` (isolated
-   copy), code on the main workdir. Two background shells, same turn.
-   ```bash
-   pilot-workers dispatch --provider <tc-key> --mode test-case --workdir "$PWD" --task-file <tc-task> --worktree &
-   pilot-workers dispatch --provider <code-key> --mode code --workdir "$PWD" --task-file <code-task> &
-   ```
-2. **Contracts**: test-case must be ALL RED (every test fails — testing
-   behavior that does not exist yet); code must be ALL GREEN (regression).
-3. **Merge depends on who finishes first:**
-   - **test-case first** → merge test files immediately. Code is still
-     running; its validation will discover the new tests and becomes both
-     regression AND new-test verification.
-   - **code first** → code's validation is regression-only. Wait for
-     test-case, then merge test files.
-4. **Main session validates after merge** — run the project's test command
-   locally. This is the authoritative result.
-   ```bash
-   cd <worktree-path> && git add -A && git commit -m "test-case: <summary>"
-   cd "$PWD" && git merge <worktree-branch>   # or cherry-pick
-   ```
-- **Clean up** the worktree when done:
-  ```bash
-  pilot-workers maintain worktrees remove <worktree-path>
-  ```
 
 <!--PILOT_GENERATED_BEGIN-->
 <!--PILOT_GENERATED_END-->

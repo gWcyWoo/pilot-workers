@@ -40,7 +40,7 @@ def test_template_valid_mode_prints_template(capsys):
 
 
 def test_template_each_mode_nonempty(capsys):
-    for mode in ("code", "explore", "test", "test-case", "review"):
+    for mode in ("code", "explore", "test", "review"):
         assert main_mod.main(["template", mode]) == 0
         assert len(capsys.readouterr().out) > 100
 
