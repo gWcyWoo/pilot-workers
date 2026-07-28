@@ -1,15 +1,17 @@
 ---
 name: pilot-workers
-description: Plan with Codex, then run bounded tasks (code, explore, test, test-case, review, resume) through isolated LLM workers via the pilot-workers CLI and verify their structured verdicts. Invoke explicitly as `$pilot-workers [code|explore|test|test-case|review|resume] [task]`. {{PILOT_PROVIDER_TRIGGERS}}
+description: Executor layer — assigns each kind of work (code, explore, test, test-case, review, resume) to an isolated LLM worker (provider) without changing the main session's own workflow, task decomposition, or verification strategy. When the main session decides to write code, write test cases, run tests, explore, or review, the assigned provider executes it. Invoke explicitly as `$pilot-workers [code|explore|test|test-case|review|resume] [task]`. {{PILOT_PROVIDER_TRIGGERS}}
 ---
 
 # pilot-workers Playbook
 
 Parse the first word after `$pilot-workers` as the mode
-(`code`/`explore`/`test`/`review`/`resume`); otherwise default to `code` and
-treat all text as the task. Keep planning, task decomposition, and final
-verification with Codex; give the worker only settled decisions. Workers are
-separate OpenCode processes that **cannot see this conversation**.
+(`code`/`explore`/`test`/`test-case`/`review`/`resume`); otherwise default to
+`code` and treat all text as the task. Keep planning, task decomposition,
+workflow decisions (TDD or not, what order, how to verify), and final
+verification with Codex — pilot-workers only assigns WHO executes each kind of
+work, never WHAT to do or in WHAT order. Workers are separate OpenCode
+processes that **cannot see this conversation**.
 
 ## When this skill applies
 
@@ -126,41 +128,36 @@ partial), `unavailable` (no block at all — the worker ignored the contract).
   `final_text_path` are null. Consume rule: read `reason` + `stderr_tail`
   only.
 
-## Parallel test-case + code workflow
+## Dispatching test-case and code together
 
-When both test-case and code are routed, run them in parallel:
+When both test-case and code are routed, dispatch both in parallel.
+The main session decides WHETHER to use test-case; once both are needed,
+the parallel mechanics below apply.
 
 1. **Dispatch both simultaneously** — test-case with `--worktree` (isolated
-   copy), code on the main workdir. Two background shells, both started
-   in the same turn.
+   copy), code on the main workdir. Two background shells, same turn.
    ```bash
    pilot-workers dispatch --provider <tc-key> --mode test-case --workdir "$PWD" --task-file <tc-task> --worktree &
    pilot-workers dispatch --provider <code-key> --mode code --workdir "$PWD" --task-file <code-task> &
    ```
-2. **test-case must be ALL RED** — every generated test must fail. A test
-   that passes is not testing new behavior; the worker rewrites it.
-   **code must be ALL GREEN** — its validation is regression verification.
+2. **Contracts**: test-case must be ALL RED (every test fails — testing
+   behavior that does not exist yet); code must be ALL GREEN (regression).
 3. **Merge depends on who finishes first:**
-   - **test-case first** → merge test files into the main workdir
-     immediately. Code is still running; its validation step will discover
-     the new tests. Code's validation becomes both regression AND new-test
-     verification.
-   - **code first** → code's validation is regression-only (no new tests
-     yet). Wait for test-case to finish, then merge test files.
-4. **Main session always validates as the final step** — run the project's
-   test command locally after merge, regardless of which path was taken.
-   This is the authoritative result; worker validations are process signals.
+   - **test-case first** → merge test files immediately. Code is still
+     running; its validation will discover the new tests and becomes both
+     regression AND new-test verification.
+   - **code first** → code's validation is regression-only. Wait for
+     test-case, then merge test files.
+4. **Main session validates after merge** — run the project's test command
+   locally. This is the authoritative result.
    ```bash
    cd <worktree-path> && git add -A && git commit -m "test-case: <summary>"
    cd "$PWD" && git merge <worktree-branch>   # or cherry-pick
-   # run tests locally
    ```
-5. **Clean up** once tests pass:
-   ```bash
-   pilot-workers maintain worktrees remove <worktree-path>
-   ```
-   If tests fail, the failure tells you whether the interface changed
-   (code's fault) or the test is wrong (test-case's fault).
+- **Clean up** the worktree when done:
+  ```bash
+  pilot-workers maintain worktrees remove <worktree-path>
+  ```
 
 <!--PILOT_GENERATED_BEGIN-->
 <!--PILOT_GENERATED_END-->
