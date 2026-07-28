@@ -1434,3 +1434,47 @@ def test_uninstalling_the_last_provider_removes_the_mode_files(isolated):
     assert install_mod.uninstall_main(["ds", "on", "claude"]) == 0
     assert not (skill_dir / "modes").exists(), "modes/ left behind"
     assert not skill_dir.exists(), "skill directory left behind"
+
+
+# ----------------------------------------------------------------------
+# stale mode auto-cleanup
+# ----------------------------------------------------------------------
+
+
+def test_host_install_purges_stale_mode_assignments(isolated, capsys):
+    """A mode removed from the registry (e.g. test-case) must be auto-cleaned
+    from the manifest by ``install <host>``, so users on other machines don't
+    need to manually uninstall it."""
+    t = str(isolated["target"])
+    install_mod.main(["glm", "on", "claude", "for", "code", "--target", t])
+    # Inject a stale mode directly into the manifest.
+    manifest_path = isolated["home"] / "install-manifest.json"
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    data["installs"]["claude"]["modes"]["test-case"] = "glm"
+    manifest_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    install_mod.main(["claude", "--target", t])
+
+    recorded = _manifest(isolated)
+    modes = recorded["installs"]["claude"].get("modes", {})
+    assert "test-case" not in modes, f"stale mode survived: {modes}"
+    assert "code" in modes, "valid mode was also purged"
+    assert "dropped stale mode assignment: test-case" in capsys.readouterr().out
+
+
+def test_provider_install_rerender_purges_stale_modes(isolated, capsys):
+    """Adding a second provider to an existing deployment uses the rerender
+    path, which must also clean stale modes."""
+    t = str(isolated["target"])
+    install_mod.main(["glm", "on", "claude", "for", "code", "--target", t])
+    manifest_path = isolated["home"] / "install-manifest.json"
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    data["installs"]["claude"]["modes"]["test-case"] = "glm"
+    manifest_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    install_mod.main(["ds", "on", "claude"])
+
+    recorded = _manifest(isolated)
+    modes = recorded["installs"]["claude"].get("modes", {})
+    assert "test-case" not in modes, f"stale mode survived rerender: {modes}"
+    assert "code" in modes

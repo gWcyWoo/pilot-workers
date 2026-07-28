@@ -818,12 +818,23 @@ def _rerender_deployed_skill(installs: dict, host: str) -> None:
     content depends on the recorded config. No-op when the host has no
     deployed skill on record.
     """
-    skill = _deployed_skill_path(installs.get(host))
+    entry = installs.get(host)
+    skill = _deployed_skill_path(entry)
     if skill is None or not skill.is_file():
         return
-    # Atomic like every other skill write: a truncating write_text here would
-    # leave a crash as a half-written doctrine file nothing detects or repairs.
+    if isinstance(entry, dict):
+        _purge_stale_modes(entry)
     _write_skill_atomically(skill, _render_deployed_skill(installs, host))
+
+
+def _purge_stale_modes(entry: dict) -> None:
+    """Drop mode assignments that reference modes no longer in the registry."""
+    valid = set(_assignable_modes())
+    modes = entry.get("modes", {})
+    stale = [m for m in modes if m not in valid]
+    for m in stale:
+        del modes[m]
+        print(f"  dropped stale mode assignment: {m}")
 
 
 def _deploy_skill_tree(installs: dict, host: str, target: Path | None) -> None:
@@ -849,6 +860,8 @@ def _deploy_skill_tree(installs: dict, host: str, target: Path | None) -> None:
     # is pure package data + config), but the orphan sweep below must treat
     # the previous location as in-bounds when --target moves a deployment.
     previous_skill = _deployed_skill_path(entry)
+
+    _purge_stale_modes(entry)
 
     # Render BEFORE anything on disk changes. Copying first and rendering after
     # means a render failure leaves the host with a half-updated skill — or none
@@ -1375,6 +1388,8 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 # Render before destroying: a render failure must not leave the host
                 # with a purged skill and nothing to replace it.
+                if isinstance(previous, dict):
+                    _purge_stale_modes(previous)
                 rendered = _render_deployed_skill(installs, host)
                 # Migration / reinstall: purge every previous entry for this host
                 # (v3/v4 flat reinstall OR legacy v1 __all__ + v2 providers), then
