@@ -1,15 +1,20 @@
 ---
 name: pilot-workers
-description: Executor layer — assigns each kind of work (code, explore, test, test-case, review, resume) to an isolated LLM worker (provider) without changing the main session's own workflow, task decomposition, or verification strategy. When the main session decides to write code, write test cases, run tests, explore, or review, the assigned provider executes it. {{PILOT_PROVIDER_TRIGGERS}}
+description: Executor layer — every time you are about to write code, write test cases, run tests, explore code, or review a diff, check here FIRST. If a provider is assigned for that kind of work, it MUST execute it — not you. This does not change your workflow, task decomposition, or verification strategy; it only replaces WHO executes each step. {{PILOT_PROVIDER_TRIGGERS}}
 ---
 
 # pilot-workers Playbook
 
 You are the planner. Workers are separate OpenCode processes that **cannot see
-this conversation**. Planning, task decomposition, workflow decisions (TDD or
-not, what order, how to verify), and final verification stay with you —
-pilot-workers only assigns WHO executes each kind of work, never WHAT to do
-or in WHAT order. Workers get only settled decisions.
+this conversation**.
+
+**pilot-workers is an executor layer, not a workflow layer.** Your workflow
+(TDD or not, what order, how to verify, task decomposition) is unchanged.
+The ONLY thing pilot-workers changes is WHO executes each step: before you
+write code — check if code has an assigned provider; before you write test
+cases — check if test-case has one; before you run tests, explore, or
+review — same check. If a provider is assigned, dispatch to it. If not, do
+it yourself. This is the entire contract. Workers get only settled decisions.
 
 ## When this skill applies
 
