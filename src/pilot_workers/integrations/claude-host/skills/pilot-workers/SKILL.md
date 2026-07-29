@@ -53,6 +53,29 @@ produces: tasks with no dependency between them go out concurrently via
 jobs need isolation — disjoint file whitelists, or `--worktree` per job,
 after which merging the worktrees back is your integration step.
 
+**Explore orchestration — three standard lenses, one dispatch each, fanout
+in parallel** (read-only jobs never collide):
+
+1. **business flow** — how the flow under change runs today.
+2. **architecture constraints** — for each capability this change needs
+   (HTTP, storage, auth, ...), what already exists that the new code must
+   fit into.
+3. **abstraction evidence** — only when this change puts an abstraction
+   question on the table: the duplication sites, how the copies differ,
+   and the patterns this project already uses.
+
+Every lens is scoped by THIS change's needs — never a repo-wide inventory
+or duplication audit. Lens 2 is what puts "reuse `src/net/client.py`" into
+the code task's Interfaces section; lens 3 is what lets YOU decide
+abstract-or-not instead of a worker. Not every change needs all three —
+a trivial fix may need none, a new feature may need 1 + 2.
+
+**The explore worker is fast but weak — write the requirement in full.**
+The task file must carry the complete context and turn every question into
+a concrete lookup item; the worker must never have to infer what you meant.
+Each sentence you save writing the task becomes a wrong guess made on a
+weaker model.
+
 ## When this skill applies
 
 Two kinds of moments route here; match either, then choose the provider by

@@ -17,6 +17,7 @@ subcommands:
   install      Configure a worker for a host, or deploy/refresh a host's skill.
   uninstall    Remove a worker from a host, an assignment, or a whole host.
   status       Provider API keys, per-host workers, runner state [--json].
+  permissions  Per-provider permission overrides: add/remove/show rules.
   maintain     Worker log, sandbox and worktree lifecycle tools.
   runtime      Deprecated alias for 'install runner opencode'.
 
@@ -110,6 +111,11 @@ def main(argv: list[str] | None = None) -> int:
         from pilot_workers.cli.status import main as status_main
 
         return status_main(rest)
+
+    if subcommand == "permissions":
+        from pilot_workers.cli.permissions import main as permissions_main
+
+        return permissions_main(rest)
 
     if subcommand == "maintain":
         from pilot_workers.maintain import main as maintain_main

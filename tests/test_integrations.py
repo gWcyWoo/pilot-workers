@@ -156,18 +156,23 @@ def test_core_skill_divides_reasoning_by_level(host):
 
 
 @pytest.mark.parametrize("host", ["claude-host", "codex-host"])
-def test_explore_playbook_has_three_requirement_scoped_lenses(host):
-    """The explore craft: three parallel lenses (flow / constraints /
-    abstraction evidence), each bounded by the change at hand, with the
-    requirement written out in full for a fast-but-weak worker."""
-    text = " ".join((_skill_dir(host) / "modes" / "explore.md")
+def test_core_skill_has_three_requirement_scoped_explore_lenses(host):
+    """Explore orchestration (lenses + write-full-spec) belongs in the core
+    SKILL.md where the host sees it at PLANNING time — not in modes/explore.md
+    which is read only after the dispatch decision is already made."""
+    core = " ".join((_skill_dir(host) / "SKILL.md")
                     .read_text(encoding="utf-8").split())
-    assert "Three standard lenses" in text, f"{host}: lenses missing"
-    assert "abstraction evidence" in text, f"{host}: third lens missing"
-    assert "scoped by THIS change's needs" in text, (
+    assert "three standard lenses" in core.lower(), f"{host}: lenses missing from core"
+    assert "abstraction evidence" in core, f"{host}: third lens missing"
+    assert "scoped by THIS change's needs" in core, (
         f"{host}: the anti-degeneration bound is gone")
-    assert "write the requirement in full" in text, (
-        f"{host}: complete-spec discipline missing")
+    assert "write the requirement in full" in core, (
+        f"{host}: complete-spec discipline missing from core")
+    # Must NOT be in modes/explore.md (that's per-task craft, not orchestration).
+    explore = " ".join((_skill_dir(host) / "modes" / "explore.md")
+                       .read_text(encoding="utf-8").split())
+    assert "Three standard lenses" not in explore, (
+        f"{host}: lenses still duplicated in modes/explore.md")
 
 
 @pytest.mark.parametrize("host", ["claude-host", "codex-host"])

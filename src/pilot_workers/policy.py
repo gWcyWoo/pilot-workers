@@ -272,19 +272,15 @@ def agent_permissions(mode: str) -> dict[str, Any]:
     }
 
 
-def load_permission_profile(name: str) -> dict[str, Any]:
-    """Load a permission profile YAML from the permissions/ directory."""
-    path = PERMISSIONS_DIR / f"{name}.yaml"
-    if not path.is_file():
-        raise RuntimeError(f"permission profile not found: {path}")
-    if yaml is None:
-        raise RuntimeError(
-            "pyyaml is required for custom permission profiles; "
-            "install it with: pip install pyyaml"
-        )
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+def _validate_profile_shape(data: Any, path: Path) -> dict[str, Any]:
+    """Validate the {mode|_all: {shell|tools: {pattern: action}}} shape.
+
+    Shared by packaged profiles and user-level permission overrides — the two
+    stores carry the same structure, so a malformed file fails with the same
+    message either way.
+    """
     if not isinstance(data, dict):
-        raise RuntimeError(f"permission profile must be a YAML mapping: {path}")
+        raise RuntimeError(f"permission profile must be a mapping: {path}")
     for key, section in data.items():
         if key != "_all" and key not in VALID_MODES:
             raise RuntimeError(
@@ -317,6 +313,56 @@ def load_permission_profile(name: str) -> dict[str, Any]:
     return data
 
 
+def load_permission_profile(name: str) -> dict[str, Any]:
+    """Load a permission profile YAML from the permissions/ directory."""
+    path = PERMISSIONS_DIR / f"{name}.yaml"
+    if not path.is_file():
+        raise RuntimeError(f"permission profile not found: {path}")
+    if yaml is None:
+        raise RuntimeError(
+            "pyyaml is required for custom permission profiles; "
+            "install it with: pip install pyyaml"
+        )
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return _validate_profile_shape(data, path)
+
+
+def permission_overrides_path(provider_key: str) -> Path:
+    """User-level per-provider permission overrides, outside package data.
+
+    JSON rather than YAML on purpose: the file is machine-written by the
+    `permissions` CLI and machine-read here, and stdlib json keeps the load
+    path working without pyyaml (which stays optional).
+    """
+    from pilot_workers.providers import pilot_home
+
+    return pilot_home() / "permissions" / f"{provider_key}.json"
+
+
+def load_permission_overrides(provider_key: str) -> dict[str, Any] | None:
+    """Load a provider's user-level overrides, or None when absent.
+
+    Same shape as a packaged profile; a corrupt file raises rather than
+    silently dispatching with fewer rules than the operator configured.
+    """
+    import json
+
+    path = permission_overrides_path(provider_key)
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        # An unreadable file must not traceback out of the CLI nor dispatch
+        # with fewer rules than configured — same contract as corrupt JSON.
+        raise RuntimeError(f"cannot read permission overrides: {path}: {exc}")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"permission overrides are not valid JSON: {path}: {exc}")
+    return _validate_profile_shape(data, path)
+
+
 def _merge_permissions(
     base: dict[str, Any], profile: dict[str, Any] | None, mode: str,
 ) -> dict[str, Any]:
@@ -344,7 +390,22 @@ def _merge_permissions(
     # caller that reuses one.
     result = {key: (dict(value) if isinstance(value, dict) else value)
               for key, value in base.items()}
-    bash_rules = dict(result.get("bash", {}))
+    # A prior layer may have set bash WHOLESALE to a scalar ("deny") via
+    # `tools: {bash: ...}` — the early-return path below stores it unwrapped,
+    # and `dict()` on that string crashed the SECOND merge (profile then user
+    # overrides). Synthesize a map from the scalar, carrying the MODE's own
+    # guardrail denies: the re-pin loop below only re-pins keys that exist
+    # (code mode legitimately has no `*>*` deny), so a bare {"*": scalar}
+    # seed would let this layer's pattern allows widen past the mode floor.
+    prior_bash = result.get("bash", {})
+    if isinstance(prior_bash, dict):
+        bash_rules = dict(prior_bash)
+    else:
+        bash_rules = {"*": prior_bash}
+        mode_base = agent_permissions(mode).get("bash", {})
+        for pattern in (*CREDENTIAL_PATH_DENIES, "*>*"):
+            if mode_base.get(pattern) == "deny":
+                bash_rules[pattern] = "deny"
 
     bash_overridden = False
     for section in sections:
@@ -412,13 +473,28 @@ def _merge_permissions(
     return result
 
 
-def build_config(provider: Provider, mode: str, *, permission_profile: str | None = None) -> dict[str, Any]:
+def effective_permissions(
+    provider: Provider, mode: str, *, permission_profile: str | None = None,
+) -> dict[str, Any]:
+    """Built-in mode defaults → named profile → user-level overrides.
+
+    The overrides layer is merged last, so an operator's `permissions add`
+    beats package defaults; each merge re-pins the redirect/credential denies
+    and the file-tool floor, so an added allow cannot displace them.
+    """
     profile_name = permission_profile or provider.permissions
     profile = load_permission_profile(profile_name) if profile_name else None
+    permissions = _merge_permissions(agent_permissions(mode), profile, mode)
+    return _merge_permissions(
+        permissions, load_permission_overrides(provider.key), mode)
+
+
+def build_config(provider: Provider, mode: str, *, permission_profile: str | None = None) -> dict[str, Any]:
     agent_name = MODE_TO_AGENT[mode]
     prompt_mode = "code" if mode == "resume" else mode
     model = provider.model
-    permissions = _merge_permissions(agent_permissions(mode), profile, mode)
+    permissions = effective_permissions(
+        provider, mode, permission_profile=permission_profile)
     return {
         "$schema": "https://opencode.ai/config.json",
         "autoupdate": False,
