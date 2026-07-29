@@ -273,3 +273,48 @@ def test_the_mode_prompt_agrees_with_the_shared_prompt():
     for status in CODE_STATUSES:
         assert status in code_md, f"code.md never mentions {status!r}"
     assert "incomplete" not in code_md
+
+
+def test_code_prompt_gates_editing_behind_a_reuse_search():
+    """Implementation-level dedup is the code worker's job (the host settles
+    only architecture): the prompt must demand a plan + equivalent-search
+    BEFORE the first edit, a re-check after implementing, and evidence — the
+    validator rejects a result whose `reuse` field is missing."""
+    text = " ".join((PROMPTS / "code.md").read_text(encoding="utf-8").split())
+    assert "Do not start editing before this step" in text, (
+        "the pre-edit gate is gone")
+    assert "search again for equivalents" in text, (
+        "the post-implementation re-check is gone")
+    assert '"no duplicates" without commands is invalid' in text, (
+        "evidence is no longer required")
+    assert '"reuse":' in text, "the JSON template lost the reuse field"
+
+
+def test_code_prompt_keeps_cross_module_abstractions_for_the_planner():
+    """Quality-first division: a weak model may extract a helper inside its
+    own task scope, but a new cross-module abstraction is an architecture
+    decision — the worker reports the duplication evidence, the planner
+    decides."""
+    text = " ".join((PROMPTS / "code.md").read_text(encoding="utf-8").split())
+    assert ("extract a local helper only when every occurrence is inside "
+            "this task's scope") in text, "the local-extraction bound is gone"
+    assert "do not invent it, report the duplication sites" in text, (
+        "the escalation path is gone")
+    assert "extract a shared abstraction" not in text, (
+        "the prompt again tells a weak worker to invent shared abstractions")
+
+
+def test_explore_prompt_asks_for_flows_not_inventories():
+    """explore feeds the host's architecture reasoning: it must report how a
+    business flow runs, not a file-by-file listing."""
+    text = " ".join((PROMPTS / "explore.md").read_text(encoding="utf-8").split())
+    assert "architecture-level reasoning" in text
+    assert "not a file-by-file code inventory" in text
+
+
+def test_explore_prompt_forbids_judgment():
+    """The explore worker is the weakest reasoner in the system: it gathers
+    evidence; every design decision stays with the planner."""
+    text = " ".join((PROMPTS / "explore.md").read_text(encoding="utf-8").split())
+    assert "Facts only, no judgment" in text
+    assert "No design recommendations" in text

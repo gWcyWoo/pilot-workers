@@ -26,6 +26,7 @@ CODE_RESULT = {
         ],
         "passed": True,
     },
+    "reuse": "searched `rg 'def parse'` — no equivalent; nothing extracted",
     "remaining_risks": "none",
 }
 
@@ -233,12 +234,29 @@ def test_the_documented_code_statuses_are_accepted(status):
         "status": status,
         "files_changed": ["a.py"],
         "validation": {"commands": [], "passed": True},
+        "reuse": "searched, nothing to reuse",
         "remaining_risks": "none",
     }
     parse_state, result = dispatch_mod.extract_result(
         _wrap(json.dumps(payload)), "code")
     assert parse_state == "parsed"
     assert result["status"] == status
+
+
+def test_a_code_result_without_reuse_evidence_is_refused():
+    """prompts/code.md makes the reuse check mandatory with evidence; a result
+    that omits the field skipped the check, and accepting it would let workers
+    silently drop the duplication guard."""
+    payload = {
+        "status": "complete",
+        "files_changed": ["a.py"],
+        "validation": {"commands": [], "passed": True},
+        "remaining_risks": "none",
+    }
+    parse_state, result = dispatch_mod.extract_result(
+        _wrap(json.dumps(payload)), "code")
+    assert parse_state == "malformed"
+    assert result is None
 
 
 @pytest.mark.parametrize("status", ["whatever", "", "COMPLETE", "done"])

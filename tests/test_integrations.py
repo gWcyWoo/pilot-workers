@@ -129,6 +129,48 @@ def test_each_mode_has_a_pointed_at_child_file(host):
 
 
 @pytest.mark.parametrize("host", ["claude-host", "codex-host"])
+def test_core_skill_divides_reasoning_by_level(host):
+    """The division-of-reasoning contract: host owns architecture,
+    abstraction decisions and arbitration; the code worker owns
+    implementation choices inside its scope (reuse, local structure) and
+    reports cross-module duplication instead of inventing abstractions;
+    explore gathers evidence; test planning is conditional on the OUTER
+    workflow having a test stage; only cheaply-verifiable work is
+    dispatched; independent tasks parallelize via fanout."""
+    core = " ".join((_skill_dir(host) / "SKILL.md")
+                    .read_text(encoding="utf-8").split())
+    assert "## Division of reasoning" in core, f"{host}: section missing"
+    assert "integration-test planning WHEN the outer workflow has a test stage" in core, (
+        f"{host}: test planning is not conditional on the outer workflow")
+    assert "do not micro-spec implementation" in core, (
+        f"{host}: host may still micro-spec implementation")
+    assert "search-before-edit gate" in core, (
+        f"{host}: worker-side reuse enforcement not mentioned")
+    assert "fanout" in core, f"{host}: parallel orchestration missing"
+    assert "merging the worktrees back is your integration step" in core, (
+        f"{host}: parallel code integration responsibility missing")
+    assert "Cross-module abstractions are not the worker's to invent" in core, (
+        f"{host}: abstraction decisions no longer reserved for the host")
+    assert "verification is far cheaper than its execution" in core, (
+        f"{host}: the dispatch test (cheap verification) is missing")
+
+
+@pytest.mark.parametrize("host", ["claude-host", "codex-host"])
+def test_explore_playbook_has_three_requirement_scoped_lenses(host):
+    """The explore craft: three parallel lenses (flow / constraints /
+    abstraction evidence), each bounded by the change at hand, with the
+    requirement written out in full for a fast-but-weak worker."""
+    text = " ".join((_skill_dir(host) / "modes" / "explore.md")
+                    .read_text(encoding="utf-8").split())
+    assert "Three standard lenses" in text, f"{host}: lenses missing"
+    assert "abstraction evidence" in text, f"{host}: third lens missing"
+    assert "scoped by THIS change's needs" in text, (
+        f"{host}: the anti-degeneration bound is gone")
+    assert "write the requirement in full" in text, (
+        f"{host}: complete-spec discipline missing")
+
+
+@pytest.mark.parametrize("host", ["claude-host", "codex-host"])
 def test_core_skill_carries_no_mode_sections(host):
     """The split's whole point is loading less on trigger; a Mode section
     left in (or creeping back into) the core file pays its cost on every

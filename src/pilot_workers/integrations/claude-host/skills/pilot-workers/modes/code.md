@@ -6,10 +6,13 @@ holds the craft for this one mode.)
 
 - **Shape the task; the dispatch decision is already made.** Routing (or the
   user naming a provider) decided who does code work — what stays yours is
-  making the task carryable: settle every judgment call before dispatch
-  (workers get only settled decisions) and hand over specs, not questions. A
-  change that would need mid-course judgment at every step is a planning gap —
-  settle more, then dispatch.
+  making the task carryable: settle every architecture-level judgment call
+  before dispatch (interfaces, boundaries, acceptance criteria — workers get
+  only settled decisions) and hand over specs, not questions. A change that
+  would need mid-course architecture judgment is a planning gap — settle
+  more, then dispatch. Implementation-level choices inside those boundaries
+  (what to reuse, internal structure) are the worker's; its prompt enforces
+  reuse checks, so do not spell them out per task.
 - One worker call bundles at most 2-3 related fix points; split larger
   batches into multiple workers (they can run in parallel).
 - **Parallel code jobs require `--worktree`** so each worker gets an isolated
@@ -24,6 +27,11 @@ holds the craft for this one mode.)
   mismatch means it misreported its work, which colours everything else it
   claimed. Also read `exit_code` / `session_id` / `steps` / `tool_errors`
   from the verdict.
+- A `reuse` field reporting cross-module duplication is an abstraction
+  question landing on your desk: if the reported sites are not evidence
+  enough, dispatch an abstraction-evidence explore; decide; hand any
+  extraction to a NEW code task. Never bounce "clean this up" back to the
+  worker — that returns an architecture decision to the weakest model.
 - **Do not sample the diff.** Reading a few hunks of a large change licenses
   nothing about the rest; it costs attention and buys confidence you have not
   earned. Correctness comes from the test run, from exercising the behaviour

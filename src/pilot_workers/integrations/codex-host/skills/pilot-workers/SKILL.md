@@ -18,6 +18,43 @@ check if test has one; before you explore or review — same check. If a
 provider is assigned, dispatch to it. If not, do it yourself. This is the
 entire contract. Workers get only settled decisions.
 
+## Division of reasoning
+
+Reasoning splits by level, and each level has exactly one owner:
+
+- **You (host): architecture.** Business-flow reasoning — how the change
+  decomposes, module boundaries, interfaces, the dependency order between
+  tasks — plus integration-test planning WHEN the outer workflow has a test
+  stage (e.g. TDD; no test stage outside, no test planning here). Whether
+  to introduce a new shared interface or abstraction, and under which
+  pattern, is your call too — decided on explore-gathered evidence and
+  locked into the task, never left to a worker. And arbitration: consume
+  verdicts, judge acceptance, integrate results.
+- **code worker: implementation.** Inside the boundaries the task locks,
+  HOW is the worker's: what existing code to reuse, local structure and
+  helpers within its scope. Its prompt already enforces a
+  search-before-edit gate and a post-implementation reuse check — do not
+  micro-spec implementation in the task file, and do not redo its checks.
+  Cross-module abstractions are not the worker's to invent: it reports the
+  duplication evidence and you decide.
+- **explore worker: evidence.** It reports facts with file:line — how a
+  flow runs, what already exists, where duplication sits — to feed your
+  reasoning; judgment stays with you. Not a file-by-file inventory, and
+  never a recommendation.
+
+**The dispatch test, above any mode:** delegate only work whose
+verification is far cheaper than its execution — bulk reading whose
+findings slot straight into planning, implementation against a contract
+that tests check. Work with no cheap check (open-ended design, subtle
+trade-offs) never goes to a worker: that would hand the system's quality
+to its weakest model. Do it here.
+
+Orchestration follows from the dependency graph your architecture reasoning
+produces: tasks with no dependency between them go out concurrently via
+`fanout`. explore/review jobs parallelize freely (read-only). Parallel code
+jobs need isolation — disjoint file whitelists, or `--worktree` per job,
+after which merging the worktrees back is your integration step.
+
 ## When this skill applies
 
 Two kinds of moments route here; match either, then choose the provider by
@@ -61,9 +98,11 @@ file:line, a returned diff, a verdict) is local reading and needs no worker.
    then fill in the template (unique filename — parallel sessions must not
    collide). **Every task file must settle three things before dispatch:**
    (a) **Objective** — what the worker must deliver, stated as verifiable
-   outcomes. (b) **Interface and steps** — the entry points (file:line),
-   conventions to follow, and the approach to take; the worker must not
-   guess these. (c) **Boundaries** — what the worker must NOT do: files it
+   outcomes. (b) **Interfaces and entry points** — the entry points
+   (file:line), interfaces, and conventions the implementation must fit;
+   architecture is settled here, while implementation-level choices inside
+   those boundaries (what to reuse, internal structure) belong to the
+   worker. (c) **Boundaries** — what the worker must NOT do: files it
    must not touch, patterns it must not use, scope it must not exceed; an
    unlisted boundary is an invisible one.
    The task file must be **self-contained** and carry **never any

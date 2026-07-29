@@ -307,6 +307,11 @@ def _validate_code_result(payload: Any) -> bool:
             return False
     if not isinstance(validation.get("passed"), bool):
         return False
+    # Reuse evidence is mandatory: prompts/code.md requires the worker to prove
+    # it searched for existing equivalents (before and after implementing), and
+    # a result that omits the field skipped the check.
+    if not isinstance(payload.get("reuse"), str):
+        return False
     return isinstance(payload.get("remaining_risks"), str)
 
 
