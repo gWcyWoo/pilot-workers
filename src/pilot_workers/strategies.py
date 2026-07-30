@@ -46,7 +46,7 @@ def load_overrides(mode: str) -> dict[str, Any]:
         return {"added": [], "removed": []}
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise RuntimeError(f"cannot read strategy overrides: {path}: {exc}")
     try:
         data = json.loads(text)
