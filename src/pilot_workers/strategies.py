@@ -63,7 +63,18 @@ def load_overrides(mode: str) -> dict[str, Any]:
     if not isinstance(removed, list):
         raise RuntimeError(
             f"strategy overrides 'removed' must be a list: {path}")
-    return {"added": added, "removed": removed}
+    clean_added = []
+    for item in added:
+        if not isinstance(item, dict):
+            continue
+        if not isinstance(item.get("name"), str):
+            raise RuntimeError(
+                f"strategy override item 'name' must be a string: {path}")
+        if "focus" in item and not isinstance(item["focus"], str):
+            raise RuntimeError(
+                f"strategy override item 'focus' must be a string: {path}")
+        clean_added.append(item)
+    return {"added": clean_added, "removed": removed}
 
 
 def save_overrides(mode: str, overrides: dict[str, Any]) -> Path:

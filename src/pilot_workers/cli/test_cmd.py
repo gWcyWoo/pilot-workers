@@ -265,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         return _dispatch(verb, args)
-    except RuntimeError as exc:
+    except (RuntimeError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
