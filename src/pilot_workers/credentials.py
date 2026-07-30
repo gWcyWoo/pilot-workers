@@ -49,8 +49,7 @@ def ensure_private_directories(destination: Path) -> None:
 def configure(provider_key: str) -> None:
     """Prompt for a provider's API key and write it atomically at mode 0600.
 
-    Raises ``RuntimeError`` rather than ``SystemExit``: this is called as a
-    library function from ``install ... --global-key``, whose caller turns a
+    Raises ``RuntimeError`` rather than ``SystemExit``: callers turn a
     RuntimeError into a clean ``error:`` line and a non-zero exit code.
     """
     if provider_key not in PROVIDERS:

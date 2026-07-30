@@ -26,17 +26,9 @@ MAX_TASK_BYTES = 512_000
 
 PROVIDERS_DIR = Path(__file__).resolve().parent / "data" / "providers"
 
-# Keys that collide with the install/uninstall CLI grammar
-# ('install <provider> on <host>', 'install runner <name>',
-# 'uninstall for <mode> on <host>'); a provider YAML using one of these
-# would make the CLI ambiguous.
-RESERVED_PROVIDER_KEYS = frozenset(
-    {"runner", "all", "on", "claude", "codex", "for", "key"}
-)
-
-# Hosts a worker can be configured for. Lives here beside the reserved keys it
-# feeds, so the install grammar and everything that quotes it share one list.
-HOSTS = ("claude", "codex")
+# Keys that collide with CLI grammar (`install runner`, `uninstall key`);
+# a provider YAML using one of these would make the CLI ambiguous.
+RESERVED_PROVIDER_KEYS = frozenset({"runner", "key"})
 
 
 def credential_setup_hint(provider_key: str) -> str:

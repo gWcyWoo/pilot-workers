@@ -417,9 +417,7 @@ def credential_key(provider: Provider, runner: Runner, *,
     """
     path = runner.credential_path(provider)
     if not path.is_file():
-        # The remedy names hosts and install grammar, which this layer does not
-        # own — see providers.credential_setup_hint, the single copy both CLI
-        # call sites use.
+        # The remedy text lives in providers.credential_setup_hint — one copy.
         raise RuntimeError(
             f"credential missing for {provider.key}; "
             f"{providers_module.credential_setup_hint(provider.key)}"

@@ -1,9 +1,8 @@
 """Guard: no test may reach the developer's real config directories.
 
-Commands that deploy to a host's DEFAULT location (no ``--target``) write to
-``~/.claude`` or ``$CODEX_HOME``. A test that forgets ``--target`` would land
-there, outside the repo, where nothing notices. ``tests/conftest.py`` redirects
-the home directory for every test; these tests fail loudly if that stops working.
+Credential and runner paths derive from ``$CODEX_HOME`` / ``Path.home()``.
+``tests/conftest.py`` redirects the home directory for every test; these
+tests fail loudly if that stops working.
 """
 
 from __future__ import annotations
@@ -30,9 +29,8 @@ def test_pilot_home_lands_inside_the_sandbox():
     assert "pytest" in str(providers.pilot_home())
 
 
-def test_claude_default_skill_dir_is_inside_the_sandbox():
-    """The exact path the deploy would write to when --target is omitted."""
-    assert "pytest" in str(Path.home() / ".claude" / "skills")
+def test_home_based_paths_land_inside_the_sandbox():
+    assert "pytest" in str(Path.home() / ".codex")
 
 
 def test_a_dispatch_child_imports_the_same_package_as_the_parent():

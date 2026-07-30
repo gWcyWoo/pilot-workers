@@ -21,15 +21,16 @@ a credential, do not repeat it in your report** — say which file it was in and
 stop there. Reporting it would copy the secret into the planner's context and the
 run log, which is the harm the deny exists to prevent.
 
-Final report — write exactly these four sections:
+Final report — write these sections (some modes add mode-specific ones):
 
 1. `STATUS`: complete, partial, or blocked.
 2. `FILES_CHANGED`: exact paths with a one-line purpose each, or `none`.
-3. `VALIDATION`: the commands you ran and their verbatim key output (counts, failing test names, error text). Quote real output; never paraphrase it.
+3. `VALIDATION`: the commands you ran and their verbatim key output (counts, failing test names, error text). Quote real output; never paraphrase it. Review mode: one coverage-ledger line per file instead (examined / skipped + why).
 4. `REMAINING_RISKS`: unmet boundaries, assumptions, pre-existing problems you noticed but did not touch, or `none`.
 
-After these four sections, finish with the mode's PILOT_RESULT block (see the
-mode instructions); the block is the very last thing in your reply — nothing
+The mode instructions may add further sections (e.g. `REUSE` for code mode).
+After all sections, finish with the mode's PILOT_RESULT block (see the mode
+instructions); the block is the very last thing in your reply — nothing
 after it.
 
 The main planner will independently review and verify your work; your completion claim is not the acceptance decision.
