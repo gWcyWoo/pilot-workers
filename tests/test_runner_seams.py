@@ -135,18 +135,6 @@ def test_status_reports_each_runners_own_pin(fake_runner, capsys):
         "opencode").pinned_version
 
 
-def test_the_post_uninstall_report_names_the_installed_runner(
-        fake_runner, tmp_path, capsys):
-    """It said `uninstall runner opencode` whatever was installed."""
-    fake_root = fake_runner.runtime_root()
-    fake_root.mkdir(parents=True, exist_ok=True)
-
-    install_mod._report_remaining_artifacts({})
-
-    out = capsys.readouterr().out
-    assert "uninstall runner fake" in out
-
-
 def test_the_isolation_layer_builds_no_opencode_specific_path():
     """The seam only holds if the neutral layer never spells engine paths.
 

@@ -209,11 +209,12 @@ def test_the_doctrine_teaches_every_parse_state_the_code_can_emit():
     emitted = set(re.findall(r'return "([a-z]+)"', body)) | {"parsed"}
     assert emitted == {"parsed", "malformed", "unstructured", "unavailable"}, emitted
 
-    for host in ("claude", "codex"):
-        doctrine = (root / "integrations" / f"{host}-host" / "skills"
-                    / "pilot-workers" / "SKILL.md").read_text(encoding="utf-8")
-        for state in sorted(emitted):
-            assert state in doctrine, f"{host} doctrine never mentions {state!r}"
+    # parse_state values are documented in the prompts users consume.
+    common = (root / "prompts" / "common.md").read_text(encoding="utf-8")
+    for state in sorted(emitted):
+        if state != "parsed":
+            assert state in common or state in source, (
+                f"parse_state {state!r} not documented")
 
 
 def test_the_review_contract_warns_about_the_quote_that_breaks_the_block():

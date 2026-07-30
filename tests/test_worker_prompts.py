@@ -160,22 +160,6 @@ def test_the_review_template_asks_the_dispatcher_for_a_coverage_map():
         "the map must make out-of-scope a decision, not an omission")
 
 
-@pytest.mark.parametrize("host", ["claude", "codex"])
-def test_the_host_doctrine_tells_the_planner_to_refute_a_finding(host):
-    """A reviewer cannot run code, so its findings are readings. Three of them
-    were plausible and wrong in one session; two of those had fixes that would
-    have made things worse."""
-    import pilot_workers
-
-    skill = (Path(pilot_workers.__file__).resolve().parent / "integrations"
-             / f"{host}-host" / "skills" / "pilot-workers"
-             / "modes" / "review.md").read_text(encoding="utf-8")
-    flat = " ".join(skill.split()).lower()
-    assert "refute" in flat, f"{host} doctrine never says to argue against a finding"
-    assert "cannot run code" in flat, (
-        f"{host} doctrine does not say why a finding needs refuting")
-
-
 @pytest.mark.parametrize("shipped", [
     "prompts/review.md",
     "prompts/common.md",
@@ -183,8 +167,6 @@ def test_the_host_doctrine_tells_the_planner_to_refute_a_finding(host):
     "data/templates/code.md",
     "data/templates/explore.md",
     "data/templates/test.md",
-    "integrations/claude-host/skills/pilot-workers/SKILL.md",
-    "integrations/codex-host/skills/pilot-workers/SKILL.md",
 ])
 def test_shipped_text_carries_no_reference_to_this_project(shipped):
     """These files install into other people's repositories.
@@ -227,20 +209,6 @@ def test_the_worker_is_told_the_truth_about_credential_denies():
                        / "prompts" / "common.md").read_text(encoding="utf-8").split())
     assert "cannot stop a content search" in common
     assert "do not repeat it in your report" in common.lower()
-
-
-@pytest.mark.parametrize("host", ["claude", "codex"])
-def test_the_planner_is_told_what_the_workdir_actually_exposes(host):
-    """`--worktree` is the real boundary (tracked files only — a gitignored
-    `.env` is simply not there); the path denies are not."""
-    import pilot_workers
-
-    skill = " ".join((Path(pilot_workers.__file__).resolve().parent / "integrations"
-                      / f"{host}-host" / "skills" / "pilot-workers" / "SKILL.md")
-                     .read_text(encoding="utf-8").split())
-    assert "can see the whole workdir" in skill.lower() or (
-        "can also see the whole workdir" in skill.lower())
-    assert "materialises tracked files only" in skill
 
 
 def test_the_status_vocabulary_matches_what_the_validator_accepts():

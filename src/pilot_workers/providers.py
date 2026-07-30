@@ -40,16 +40,8 @@ HOSTS = ("claude", "codex")
 
 
 def credential_setup_hint(provider_key: str) -> str:
-    """The one sentence that tells a user how to supply a provider's API key.
-
-    One copy: it names install grammar and host names, and it was previously
-    written out in three places (the isolation layer, the fanout preflight and
-    the host skills), which is three places to drift.
-    """
-    first, *rest = HOSTS
-    alternatives = "".join(f" (or 'on {host}')" for host in rest[:1])
-    return (f"run: pilot-workers install {provider_key} on {first} "
-            f"--global-key{alternatives}")
+    """The one sentence that tells a user how to supply a provider's API key."""
+    return f"run: pw9 key {provider_key}"
 
 
 @dataclass(frozen=True)

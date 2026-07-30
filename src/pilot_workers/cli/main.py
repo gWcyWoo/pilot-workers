@@ -14,9 +14,10 @@ subcommands:
   dispatch     Deterministic outer shell around run (started + verdict JSON).
   fanout       Dispatch several jobs concurrently; stdout = one JSON array of verdicts.
   template     Print the task template for a mode (code|explore|test|review).
-  install      Configure a worker for a host, or deploy/refresh a host's skill.
-  uninstall    Remove a worker from a host, an assignment, or a whole host.
-  status       Provider API keys, per-host workers, runner state [--json].
+  install      Install the worker runtime (pw9 install runner opencode).
+  uninstall    Remove a runner or API key.
+  key          Configure a provider's API key (pw9 key <provider>).
+  status       Provider API keys, runner state [--json].
   permissions  Per-provider permission overrides: add/remove/show rules.
   review       Auto-fanout code review by configured axes (add/edit/remove/show).
   test         Auto-fanout test execution by configured layers (add/edit/remove/show).
@@ -24,19 +25,11 @@ subcommands:
   runtime      Deprecated alias for 'install runner opencode'.
 
 install forms:
-  install <provider> on <host> [for <mode>] [--global-key]
-  install <host|all> [--target <dir>]
   install runner <name>
 
 uninstall forms:
-  uninstall <provider> on <host>
-  uninstall for <mode> on <host>
-  uninstall key <provider>
-  uninstall <host|all>
   uninstall runner <name>
-
-A host's skill exists only where at least one provider is configured for it; a
-mode with no provider assigned stays with this session.
+  uninstall key <provider>
 
 Use 'pilot-workers <subcommand> --help' for subcommand-specific help.
 """
@@ -108,6 +101,11 @@ def main(argv: list[str] | None = None) -> int:
             print("error: uninstall not available in this build", file=sys.stderr)
             return 1
         return fn(rest)
+
+    if subcommand == "key":
+        from pilot_workers.cli.install import key_main
+
+        return key_main(rest)
 
     if subcommand == "status":
         from pilot_workers.cli.status import main as status_main

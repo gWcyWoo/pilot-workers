@@ -200,7 +200,7 @@ def test_credential_preflight_failure_spawns_nothing(
     err = capsys.readouterr().err
     assert "credential missing for glm" in err
     # A runnable command, not a placeholder the reader has to substitute into.
-    assert "pilot-workers install glm on claude --global-key" in err
+    assert "pw9 key glm" in err
 
 
 def _write_jobs_file(tmp_path, jobs):
