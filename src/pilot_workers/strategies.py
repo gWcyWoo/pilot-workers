@@ -1,0 +1,150 @@
+"""Strategy configuration: default axes/layers shipped with the package,
+user-level overrides stored in $PILOT_WORKERS_HOME/strategies/.
+
+Each mode with a strategy (review, test) has a default YAML in
+``data/strategies/<mode>.yaml`` and an optional user override JSON at
+``$PILOT_WORKERS_HOME/strategies/<mode>.json``.  The effective config is:
+default entries whose names are not removed by the user, plus any user-added
+entries, in order (defaults first, then additions).
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+try:
+    import yaml  # type: ignore[import-untyped]
+except ImportError:
+    yaml = None  # type: ignore[assignment]
+
+from pilot_workers.providers import pilot_home
+
+STRATEGIES_DIR = Path(__file__).resolve().parent / "data" / "strategies"
+
+# The key that holds the list of items — "axes" for review, "layers" for test.
+MODE_LIST_KEY = {
+    "review": "axes",
+    "test": "layers",
+}
+
+
+def _load_default(mode: str) -> list[dict[str, str]]:
+    """Load the packaged default strategy for a mode."""
+    path = STRATEGIES_DIR / f"{mode}.yaml"
+    if not path.is_file():
+        return []
+    if yaml is not None:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    else:
+        # Flat-enough fallback: each item is name + focus.
+        from pilot_workers.providers import _flat_yaml_fallback
+        data = _flat_yaml_fallback(path)
+        if data is None:
+            data = {}
+    key = MODE_LIST_KEY.get(mode, "axes")
+    items = data.get(key, [])
+    return [item for item in items if isinstance(item, dict)]
+
+
+def overrides_path(mode: str) -> Path:
+    return pilot_home() / "strategies" / f"{mode}.json"
+
+
+def load_overrides(mode: str) -> dict[str, Any]:
+    """Load user overrides: {added: [...], removed: [name, ...]}."""
+    path = overrides_path(mode)
+    if not path.is_file():
+        return {"added": [], "removed": []}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"cannot read strategy overrides: {path}: {exc}")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"strategy overrides are not valid JSON: {path}: {exc}")
+    if not isinstance(data, dict):
+        raise RuntimeError(f"strategy overrides must be a JSON object: {path}")
+    return {
+        "added": data.get("added", []),
+        "removed": data.get("removed", []),
+    }
+
+
+def save_overrides(mode: str, overrides: dict[str, Any]) -> Path:
+    from pilot_workers import runtime
+
+    path = overrides_path(mode)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    runtime.atomic_write_text(
+        path, json.dumps(overrides, indent=2) + "\n", mode=0o600,
+        prefix=".strategies.")
+    return path
+
+
+def effective(mode: str) -> list[dict[str, str]]:
+    """Merge default + user overrides into the final list of items."""
+    defaults = _load_default(mode)
+    overrides = load_overrides(mode)
+    removed = set(overrides.get("removed", []))
+    result = [item for item in defaults if item.get("name") not in removed]
+    for item in overrides.get("added", []):
+        if isinstance(item, dict) and item.get("name"):
+            # User addition replaces a default with the same name (edit).
+            result = [r for r in result if r.get("name") != item["name"]]
+            result.append(item)
+    return result
+
+
+def add_item(mode: str, name: str, focus: str) -> None:
+    """Add or replace a user-level item."""
+    overrides = load_overrides(mode)
+    added = [i for i in overrides["added"] if i.get("name") != name]
+    added.append({"name": name, "focus": focus})
+    overrides["added"] = added
+    # Adding back something that was removed: un-remove it.
+    overrides["removed"] = [n for n in overrides["removed"] if n != name]
+    save_overrides(mode, overrides)
+
+
+def remove_item(mode: str, name: str) -> bool:
+    """Remove an item (default or user-added). Returns True if anything changed."""
+    defaults = _load_default(mode)
+    overrides = load_overrides(mode)
+    default_names = {item["name"] for item in defaults}
+    # Remove from user additions.
+    before = len(overrides["added"])
+    overrides["added"] = [i for i in overrides["added"]
+                          if i.get("name") != name]
+    changed = len(overrides["added"]) < before
+    # If it's a default, mark it removed.
+    if name in default_names and name not in overrides["removed"]:
+        overrides["removed"].append(name)
+        changed = True
+    if changed:
+        # Clean up: empty overrides → delete the file.
+        if not overrides["added"] and not overrides["removed"]:
+            path = overrides_path(mode)
+            if path.is_file():
+                path.unlink()
+            return True
+        save_overrides(mode, overrides)
+    return changed
+
+
+def edit_item(mode: str, name: str, focus: str) -> None:
+    """Edit an existing item's focus. Works for both defaults and user-added."""
+    add_item(mode, name, focus)
+
+
+def item_names(mode: str) -> set[str]:
+    """All item names in defaults + user additions (before removal filter)."""
+    defaults = _load_default(mode)
+    overrides = load_overrides(mode)
+    names = {item["name"] for item in defaults}
+    names |= {item["name"] for item in overrides.get("added", [])
+              if isinstance(item, dict)}
+    return names

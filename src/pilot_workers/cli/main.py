@@ -18,6 +18,8 @@ subcommands:
   uninstall    Remove a worker from a host, an assignment, or a whole host.
   status       Provider API keys, per-host workers, runner state [--json].
   permissions  Per-provider permission overrides: add/remove/show rules.
+  review       Auto-fanout code review by configured axes (add/edit/remove/show).
+  test         Auto-fanout test execution by configured layers (add/edit/remove/show).
   maintain     Worker log, sandbox and worktree lifecycle tools.
   runtime      Deprecated alias for 'install runner opencode'.
 
@@ -116,6 +118,16 @@ def main(argv: list[str] | None = None) -> int:
         from pilot_workers.cli.permissions import main as permissions_main
 
         return permissions_main(rest)
+
+    if subcommand == "review":
+        from pilot_workers.cli.review_cmd import main as review_main
+
+        return review_main(rest)
+
+    if subcommand == "test":
+        from pilot_workers.cli.test_cmd import main as test_main
+
+        return test_main(rest)
 
     if subcommand == "maintain":
         from pilot_workers.maintain import main as maintain_main

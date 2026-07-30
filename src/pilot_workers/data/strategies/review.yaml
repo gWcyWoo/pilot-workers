@@ -1,0 +1,11 @@
+axes:
+  - name: architecture
+    focus: "Layering violations, module boundary crossings, interface contract mismatches, dependency direction, naming and structural conventions"
+  - name: correctness
+    focus: "Logic errors, boundary conditions, off-by-one, null/empty handling, type mismatches, unreachable code"
+  - name: regression
+    focus: "Changes that break existing tests, alter public API contracts, remove or weaken existing guarantees, change observable behavior without test updates"
+  - name: performance
+    focus: "N+1 queries, unnecessary allocations, missing indexes, unbounded loops, memory leaks, blocking calls in async paths"
+  - name: security
+    focus: "Injection (SQL, command, XSS), authentication/authorization bypass, credential exposure, path traversal, insecure deserialization"

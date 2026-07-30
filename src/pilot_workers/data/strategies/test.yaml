@@ -1,0 +1,5 @@
+layers:
+  - name: unit
+    focus: "Unit tests and integration tests — the project's standard test command (pytest, jest, go test, etc.)"
+  - name: e2e
+    focus: "End-to-end tests — full-stack verification through the public interface or CLI entry points"

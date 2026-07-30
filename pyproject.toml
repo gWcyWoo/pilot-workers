@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pilot-workers"
-version = "0.5.13"
+version = "0.6.0"
 description = "Dispatch bounded tasks to isolated LLM workers (GLM, Kimi, and more)"
 readme = "README.md"
 license = "MIT"
@@ -17,6 +17,7 @@ dev = ["pytest>=8.0", "pyyaml>=6.0"]
 
 [project.scripts]
 pilot-workers = "pilot_workers.cli.main:main"
+pw9 = "pilot_workers.cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -28,6 +29,7 @@ pilot_workers = [
     "data/permissions/*.yaml",
     "data/permissions/*.md",
     "data/templates/*.md",
+    "data/strategies/*.yaml",
     "prompts/*.md",
     "integrations/**/*.md",
     "integrations/**/*.yaml",
