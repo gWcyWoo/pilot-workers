@@ -45,7 +45,8 @@ def _open_editor(initial: str, suffix: str = ".md") -> str | None:
         path = f.name
     try:
         mtime_before = os.path.getmtime(path)
-        subprocess.run([editor, path], check=True)
+        import shlex
+        subprocess.run([*shlex.split(editor), path], check=True)
         mtime_after = os.path.getmtime(path)
         if mtime_after == mtime_before:
             return None
@@ -118,8 +119,10 @@ def _cmd_edit(name: str | None) -> int:
             print("cancelled (no [name] blocks found)")
             return 0
         parsed_names = {n for n, _ in parsed}
+        existing = {item.get("name"): item.get("focus", "") for item in items}
         for n, f in parsed:
-            strategies.edit_item(_MODE, n, f)
+            if existing.get(n) != f:
+                strategies.edit_item(_MODE, n, f)
         for item in items:
             if item["name"] not in parsed_names:
                 strategies.remove_item(_MODE, item["name"])
