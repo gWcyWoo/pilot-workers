@@ -81,7 +81,7 @@ def effective(mode: str) -> list[dict[str, str]]:
     """Merge default + user overrides into the final list of items."""
     defaults = _load_default(mode)
     overrides = load_overrides(mode)
-    removed = set(overrides.get("removed", []))
+    removed = {n for n in overrides.get("removed", []) if isinstance(n, str)}
     result = [item for item in defaults if item.get("name") not in removed]
     for item in overrides.get("added", []):
         if isinstance(item, dict) and item.get("name"):

@@ -151,17 +151,17 @@ def _cmd_remove(name: str) -> int:
 def _cmd_show() -> int:
     items = strategies.effective(_MODE)
     overrides = strategies.load_overrides(_MODE)
-    removed = set(overrides.get("removed", []))
-    added_names = {i["name"] for i in overrides.get("added", [])
-                   if isinstance(i, dict)}
+    removed = {n for n in overrides.get("removed", []) if isinstance(n, str)}
+    added_names = {i.get("name") for i in overrides.get("added", [])
+                   if isinstance(i, dict) and i.get("name")}
     defaults = strategies._load_default(_MODE)
-    default_names = {i["name"] for i in defaults}
+    default_names = {i.get("name") for i in defaults if isinstance(i, dict)}
     if not items:
         print("(no layers configured)")
         return 0
     print(f"test layers ({len(items)}):\n")
     for item in items:
-        name = item["name"]
+        name = item.get("name", "??")
         tag = ""
         if name in added_names:
             tag = "  [user]" if name not in default_names else "  [edited]"
@@ -263,6 +263,14 @@ def main(argv: list[str] | None = None) -> int:
 
     verb = args[0]
 
+    try:
+        return _dispatch(verb, args)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+def _dispatch(verb: str, args: list[str]) -> int:
     if verb == "add":
         if len(args) != 2:
             print("usage: pw9 test add <name>", file=sys.stderr)
