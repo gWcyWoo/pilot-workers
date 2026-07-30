@@ -110,6 +110,9 @@ def _cmd_edit(name: str | None) -> int:
                 current_focus.append(line)
         if current_name:
             parsed.append((current_name, "\n".join(current_focus).strip()))
+        if not parsed:
+            print("cancelled (no [name] blocks found)")
+            return 0
         parsed_names = {n for n, _ in parsed}
         for n, f in parsed:
             strategies.edit_item(_MODE, n, f)
@@ -308,6 +311,10 @@ def main(argv: list[str] | None = None) -> int:
     if not provider or not workdir:
         print("error: --provider and --workdir are required", file=sys.stderr)
         print(USAGE, end="", file=sys.stderr)
+        return 2
+
+    if provider not in PROVIDERS:
+        print(f"error: unknown provider: {provider}", file=sys.stderr)
         return 2
 
     if dry_run:

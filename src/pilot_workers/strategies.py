@@ -55,10 +55,15 @@ def load_overrides(mode: str) -> dict[str, Any]:
             f"strategy overrides are not valid JSON: {path}: {exc}")
     if not isinstance(data, dict):
         raise RuntimeError(f"strategy overrides must be a JSON object: {path}")
-    return {
-        "added": data.get("added", []),
-        "removed": data.get("removed", []),
-    }
+    added = data.get("added", [])
+    removed = data.get("removed", [])
+    if not isinstance(added, list):
+        raise RuntimeError(
+            f"strategy overrides 'added' must be a list: {path}")
+    if not isinstance(removed, list):
+        raise RuntimeError(
+            f"strategy overrides 'removed' must be a list: {path}")
+    return {"added": added, "removed": removed}
 
 
 def save_overrides(mode: str, overrides: dict[str, Any]) -> Path:
