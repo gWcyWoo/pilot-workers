@@ -46,7 +46,11 @@ def _open_editor(initial: str, suffix: str = ".md") -> str | None:
     try:
         mtime_before = os.path.getmtime(path)
         import shlex
-        subprocess.run([*shlex.split(editor), path], check=True)
+        try:
+            cmd = [*shlex.split(editor), path]
+        except ValueError:
+            cmd = [editor, path]
+        subprocess.run(cmd, check=True)
         mtime_after = os.path.getmtime(path)
         if mtime_after == mtime_before:
             return None
