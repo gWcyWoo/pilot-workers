@@ -20,21 +20,6 @@ from pilot_workers.runners import get_runner
 STALE_TMP_GRACE_SECONDS = 60
 
 
-def credential_status(provider_key: str) -> dict[str, object]:
-    from pilot_workers import runtime
-    provider = PROVIDERS[provider_key]
-    runner = get_runner(provider.runner)
-    meta = runtime.credential_metadata(provider, runner)
-    return {
-        "provider": provider_key,
-        "runner": provider.runner,
-        "provider_id": provider.provider_id,
-        "configured": meta["configured"],
-        "secure_mode": meta["secure_mode"],
-        "path": meta["path"],
-    }
-
-
 def ensure_private_directories(destination: Path) -> None:
     current = workers_root()
     target = destination.parent

@@ -29,7 +29,7 @@ pilot_workers = [
     "data/permissions/*.yaml",
     "data/permissions/*.md",
     "data/templates/*.md",
-    "data/strategies/*.yaml",
+    "data/strategies/*.json",
     "prompts/*.md",
     "scripts/*.sh",
 ]

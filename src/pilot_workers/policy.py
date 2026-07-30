@@ -407,16 +407,27 @@ def _merge_permissions(
             if mode_base.get(pattern) == "deny":
                 bash_rules[pattern] = "deny"
 
-    bash_overridden = False
     for section in sections:
         if not isinstance(section, dict):
             continue
         for pattern, action in (section.get("shell") or {}).items():
             bash_rules[pattern] = action
         for tool, action in (section.get("tools") or {}).items():
-            result[tool] = action
             if tool == "bash":
-                bash_overridden = True
+                # A wholesale bash override via tools: {bash: ...} must flow
+                # through bash_rules (not result["bash"]) so the re-pin loop
+                # below can re-assert guardrails. A scalar ("deny") is
+                # converted to a seed map; a dict is merged on top.
+                if isinstance(action, dict):
+                    bash_rules.update(action)
+                else:
+                    bash_rules = {"*": action}
+                    mode_base = agent_permissions(mode).get("bash", {})
+                    for pattern in (*CREDENTIAL_PATH_DENIES, "*>*"):
+                        if mode_base.get(pattern) == "deny":
+                            bash_rules[pattern] = "deny"
+            else:
+                result[tool] = action
 
     # Profile shell rules are APPENDED, so a pattern the base does not already
     # have lands after the two ordering-sensitive denies that have to come last.
@@ -450,7 +461,11 @@ def _merge_permissions(
     # is likewise untouched.
     for tool in FILE_TOOLS:
         value = result.get(tool)
-        if value == "allow":
+        if not isinstance(value, (str, dict)):
+            # Non-string, non-dict values (True, int, list) are not valid
+            # OpenCode tool actions; treat as "allow" so the floor applies.
+            result[tool] = file_tool_path_rules()
+        elif value == "allow":
             result[tool] = file_tool_path_rules()
         elif isinstance(value, dict):
             for pattern, action in file_tool_path_rules().items():
@@ -458,17 +473,10 @@ def _merge_permissions(
                     value.pop(pattern, None)
                     value[pattern] = action   # last-match-wins: denies go last
 
-    if bash_overridden:
-        # A profile named `bash` wholesale under `tools:` — `tools: {bash: deny}`
-        # to shut the shell off, or a dict mirroring OpenCode's own config shape.
-        # Overwriting it with the merged rule map was the worst of the three
-        # possible outcomes: the operator believes the shell is configured and it
-        # is not. Tracked with an explicit FLAG: the first version tested
-        # `isinstance(..., str)` and silently dropped a dict override; the second
-        # compared identity against the base value, which stopped working the
-        # moment the base stopped being shared by a shallow copy. A flag says what
-        # is meant and survives both.
-        return result
+    # Always write the merged bash rules back — even when a profile set bash
+    # wholesale via `tools: {bash: ...}`. The early return skipped this
+    # assignment, so the guardrail re-pin above was discarded and the raw
+    # override went through with no redirect/credential denies.
     result["bash"] = bash_rules
     return result
 

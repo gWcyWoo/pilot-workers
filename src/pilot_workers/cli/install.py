@@ -97,7 +97,7 @@ def _key_configure(provider_key: str) -> int:
         return 2
     try:
         credentials.configure(provider_key)
-    except RuntimeError as exc:
+    except (RuntimeError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0

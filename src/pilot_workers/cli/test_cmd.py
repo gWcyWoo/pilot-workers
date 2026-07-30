@@ -62,6 +62,9 @@ def _open_editor(initial: str, suffix: str = ".md") -> str | None:
 
 
 def _cmd_add(name: str) -> int:
+    if "/" in name or "\\" in name or not name.strip():
+        print(f"error: invalid layer name: {name!r}", file=sys.stderr)
+        return 2
     existing = strategies.effective(_MODE)
     if any(item["name"] == name for item in existing):
         print(f"error: layer {name!r} already exists; use 'pw9 test edit {name}'",
@@ -175,8 +178,10 @@ def _cmd_show() -> int:
 def _generate_task(layer: dict[str, str], workdir: str) -> str:
     name = layer["name"]
     focus = layer.get("focus", "")
-    ts = int(time.time())
-    path = Path(tempfile.gettempdir()) / f"pw9-test-{name}-{ts}.md"
+    fd, path_str = tempfile.mkstemp(
+        suffix=".md", prefix=f"pw9-test-{name.replace('/', '_')}-")
+    os.close(fd)
+    os.chmod(path_str, 0o600)
     content = f"""<!-- pw9 auto-generated test task — layer: {name} -->
 
 # Test Target
@@ -193,8 +198,8 @@ Project at {workdir}.
 - Report the command, exit code, pass/fail counts, and any failure details.
 - If tests fail, report each failure with the test name and error message.
 """
-    path.write_text(content, encoding="utf-8")
-    return str(path)
+    Path(path_str).write_text(content, encoding="utf-8")
+    return path_str
 
 
 def _cmd_run(provider: str, workdir: str, timeout: int) -> int:

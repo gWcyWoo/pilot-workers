@@ -237,7 +237,7 @@ def test_scalar_bash_from_a_prior_layer_does_not_crash_the_second_merge(isolated
     base = policy.agent_permissions("explore")
     first = policy._merge_permissions(
         base, {"explore": {"tools": {"bash": "deny"}}}, "explore")
-    assert first["bash"] == "deny"
+    assert first["bash"]["*"] == "deny"
     second = policy._merge_permissions(
         first, {"_all": {"shell": {"apifox *": "allow"}}}, "explore")
     rules = second["bash"]
@@ -263,13 +263,14 @@ def test_scalar_bash_seed_does_not_import_a_redirect_deny_into_code_mode(isolate
     assert _verdict("cat .env", rules) == "deny"  # credential floor is universal
 
 
-def test_show_renders_a_scalar_bash_instead_of_crashing(isolated, capsys):
+def test_show_renders_a_wholesale_bash_deny_without_crashing(isolated, capsys):
     path = policy.permission_overrides_path("ds")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"_all": {"tools": {"bash": "deny"}}}),
                     encoding="utf-8")
     assert perms_cli.main(["show", "ds", "explore"]) == 0
-    assert "shell: deny" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert '"*" deny' in out
 
 
 def test_profile_plus_overrides_keep_guardrails_pinned(isolated):

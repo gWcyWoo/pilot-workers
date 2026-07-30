@@ -538,12 +538,22 @@ def test_a_profile_may_still_deliberately_re_allow_redirects():
 
 
 def test_a_profile_can_shut_the_shell_off_for_a_mode():
-    """`tools: {bash: deny}` was silently inert — the merged rule map overwrote
-    it, so an operator who thought they had disabled the shell had not."""
+    """`tools: {bash: deny}` must deny everything. The merge converts the
+    scalar into a map ({*: deny} + guardrails) so the re-pin loop still runs."""
     merged = _merge_permissions(
         policy.agent_permissions("review"),
         {"_all": {"tools": {"bash": "deny"}}}, "review")
-    assert merged["bash"] == "deny"
+    rules = merged["bash"]
+    assert isinstance(rules, dict)
+    assert rules["*"] == "deny"
+    import fnmatch
+    def _v(cmd, r):
+        v = "deny"
+        for p, a in r.items():
+            if fnmatch.fnmatch(cmd, p): v = a
+        return v
+    assert _v("ls", rules) == "deny"
+    assert _v("cat file.txt", rules) == "deny"
 
 
 def test_an_ordinary_profile_still_gets_the_merged_shell_map():
@@ -582,13 +592,23 @@ def test_a_profile_widening_a_deny_is_still_an_override():
 @pytest.mark.parametrize("value", ["deny", "allow", {"*": "deny"},
                                    {"pytest*": "allow", "*": "deny"}])
 def test_a_profile_bash_override_is_honoured_whatever_its_shape(value):
-    """The first version tested `isinstance(..., str)` and silently dropped a
-    dict — which is the MORE natural mistake, since it mirrors OpenCode's own
-    config shape."""
+    """A wholesale bash override flows through bash_rules (not result["bash"])
+    so the guardrail re-pin can re-assert redirect/credential denies. The
+    operator's intent (deny-all, allow-all, or a custom map) is preserved,
+    AND guardrails are appended."""
     merged = _merge_permissions(
         policy.agent_permissions("review"), {"_all": {"tools": {"bash": value}}},
         "review")
-    assert merged["bash"] == value
+    rules = merged["bash"]
+    assert isinstance(rules, dict)
+    if isinstance(value, str):
+        assert rules["*"] == value
+    else:
+        for k, v in value.items():
+            assert rules[k] == v
+    # Guardrails always present in a mode that has them.
+    assert rules.get("*>*") == "deny"
+    assert rules.get("*auth.json*") == "deny"
 
 
 def test_an_untouched_bash_still_gets_the_merged_map():

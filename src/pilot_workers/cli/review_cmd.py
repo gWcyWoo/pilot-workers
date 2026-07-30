@@ -64,6 +64,9 @@ def _open_editor(initial: str, suffix: str = ".md") -> str | None:
 
 
 def _cmd_add(name: str) -> int:
+    if "/" in name or "\\" in name or not name.strip():
+        print(f"error: invalid axis name: {name!r}", file=sys.stderr)
+        return 2
     existing = strategies.effective(_MODE)
     if any(item["name"] == name for item in existing):
         print(f"error: axis {name!r} already exists; use 'review edit {name}'",
@@ -181,8 +184,11 @@ def _generate_task(axis: dict[str, str], workdir: str) -> str:
     """Generate a review task file for one axis."""
     name = axis["name"]
     focus = axis.get("focus", "")
-    ts = int(time.time())
-    path = Path(tempfile.gettempdir()) / f"pw9-review-{name}-{ts}.md"
+    fd, path_str = tempfile.mkstemp(
+        suffix=".md", prefix=f"pw9-review-{name.replace('/', '_')}-")
+    os.close(fd)
+    os.chmod(path_str, 0o600)
+    path = Path(path_str)
     content = f"""<!-- pw9 auto-generated review task — axis: {name} -->
 
 # Review Target
@@ -209,7 +215,7 @@ for untracked files. Review ALL changed and new files.
 none
 """
     path.write_text(content, encoding="utf-8")
-    return str(path)
+    return path_str
 
 
 def _cmd_run(provider: str, workdir: str, timeout: int) -> int:

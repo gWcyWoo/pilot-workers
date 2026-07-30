@@ -1,8 +1,8 @@
 """Strategy configuration: default axes/layers shipped with the package,
 user-level overrides stored in $PILOT_WORKERS_HOME/strategies/.
 
-Each mode with a strategy (review, test) has a default YAML in
-``data/strategies/<mode>.yaml`` and an optional user override JSON at
+Each mode with a strategy (review, test) has a default JSON in
+``data/strategies/<mode>.json`` and an optional user override JSON at
 ``$PILOT_WORKERS_HOME/strategies/<mode>.json``.  The effective config is:
 default entries whose names are not removed by the user, plus any user-added
 entries, in order (defaults first, then additions).
@@ -14,16 +14,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-try:
-    import yaml  # type: ignore[import-untyped]
-except ImportError:
-    yaml = None  # type: ignore[assignment]
-
 from pilot_workers.providers import pilot_home
 
 STRATEGIES_DIR = Path(__file__).resolve().parent / "data" / "strategies"
 
-# The key that holds the list of items — "axes" for review, "layers" for test.
 MODE_LIST_KEY = {
     "review": "axes",
     "test": "layers",
@@ -32,17 +26,10 @@ MODE_LIST_KEY = {
 
 def _load_default(mode: str) -> list[dict[str, str]]:
     """Load the packaged default strategy for a mode."""
-    path = STRATEGIES_DIR / f"{mode}.yaml"
+    path = STRATEGIES_DIR / f"{mode}.json"
     if not path.is_file():
         return []
-    if yaml is not None:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    else:
-        # Flat-enough fallback: each item is name + focus.
-        from pilot_workers.providers import _flat_yaml_fallback
-        data = _flat_yaml_fallback(path)
-        if data is None:
-            data = {}
+    data = json.loads(path.read_text(encoding="utf-8"))
     key = MODE_LIST_KEY.get(mode, "axes")
     items = data.get(key, [])
     return [item for item in items if isinstance(item, dict)]
@@ -138,13 +125,3 @@ def remove_item(mode: str, name: str) -> bool:
 def edit_item(mode: str, name: str, focus: str) -> None:
     """Edit an existing item's focus. Works for both defaults and user-added."""
     add_item(mode, name, focus)
-
-
-def item_names(mode: str) -> set[str]:
-    """All item names in defaults + user additions (before removal filter)."""
-    defaults = _load_default(mode)
-    overrides = load_overrides(mode)
-    names = {item["name"] for item in defaults}
-    names |= {item["name"] for item in overrides.get("added", [])
-              if isinstance(item, dict)}
-    return names
