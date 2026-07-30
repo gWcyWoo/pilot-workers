@@ -2,16 +2,17 @@
 
 Dispatch bounded tasks to isolated LLM workers. Your main AI agent (Claude, Codex, or any planner) stays in control of requirements, planning, and verification — the worker only executes what it's told.
 
+CLI command: `pw9` (alias: `pilot-workers`).
+
 ## What it does
 
 - **Provider isolation**: each model (GLM, Kimi, DeepSeek, or your own) gets its own credentials, XDG directories, logs, and session storage. No cross-contamination.
 - **Fixed routing**: provider, model, and endpoint are locked per YAML config. Tasks cannot override them.
 - **Security by default**: API keys never appear in CLI args, environment variables, task contracts, or logs. Output is auto-redacted.
 - **Five modes**: `code` (edit), `explore` (read-only), `test` (run tests), `review` (read-only audit), `resume` (continue a prior code session).
-- **Pluggable runners**: the runner adapter layer (`Runner` ABC) abstracts engine-specific details. Currently ships with OpenCode; designed for future alternatives.
-- **Observable**: two-line JSON contract (`started` + structured `verdict` carrying `parse_state`, a per-mode `result`, and `final_text_path`) for AI planners; human-readable `latest.log` for `tail -f`.
-- **Per-run sandboxes**: every dispatch runs inside its own isolated XDG tree (`providers/<key>/runs/<run_id>/`) with a zero-copy symlink to the canonical credential and a shared per-provider cache; resume (`--session` + `--run-id`) reuses the original sandbox.
-- **Host-level playbook**: one `pilot-workers` playbook skill per host (Claude Code or Codex). A host's skill exists only where at least one provider is configured for it, and its worker table is generated from that host's own configuration — a host never learns about a provider you did not give it.
+- **Auto-fanout review/test**: `pw9 review` and `pw9 test` automatically split work by configurable axes/layers and dispatch in parallel.
+- **Pluggable runners**: the runner adapter layer (`Runner` ABC) abstracts engine-specific details. Currently ships with OpenCode.
+- **Observable**: two-line JSON contract (`started` + structured `verdict`) for AI planners; human-readable `latest.log` for `tail -f`.
 
 ## Install
 
@@ -19,109 +20,55 @@ Dispatch bounded tasks to isolated LLM workers. Your main AI agent (Claude, Code
 pip install pilot-workers
 ```
 
-## Quick start
+## Quick Start
 
 ```bash
 # 1. Install the worker runtime
-pilot-workers install runner opencode
+pw9 install runner opencode
 
-# 2. Make a provider available to a host, and set its API key while you are
-#    there (interactive, key never displayed). The key belongs to the PROVIDER,
-#    so it is configured once and every host uses it.
-pilot-workers install glm on claude --global-key
-pilot-workers install kimi-k3 on claude for code --global-key   # ...and route code -> kimi-k3
-pilot-workers install ds on codex for explore --global-key
+# 2. Configure a provider's API key
+pw9 key glm
 
-# 3. (optional) Refresh a host's deployed skill in place
-pilot-workers install claude    # idempotent sync; deploys nothing if no provider is configured
-pilot-workers install codex
-pilot-workers install all       # both hosts
+# 3. Check status
+pw9 status
 
-# 4. Check everything is ready
-pilot-workers status
+# 4. Run a task
+pw9 run --provider glm --mode code --workdir /path/to/project --task-file /tmp/task.md
 
-# 5. Verify with a dry-run
-pilot-workers run --provider glm --mode explore --workdir . --task "hello" --dry-run
+# 5. Auto-fanout code review (5 axes in parallel)
+pw9 review --provider glm --workdir .
 
-# 6. Run a real task
-pilot-workers template code > /tmp/task.md    # generate a structured task template
-# fill in the template, then:
-pilot-workers dispatch --provider glm --mode code --workdir /path/to/project --task-file /tmp/task.md
-# dispatch stdout = exactly two JSON lines: worker_runner.started + worker_runner.verdict
+# 6. Auto-fanout test execution
+pw9 test --provider glm --workdir .
 ```
 
-## CLI reference
+## Adding a Provider
 
-```
-pilot-workers <subcommand> [args]
+Drop a YAML file in `data/providers/` with the required fields (`key`, `provider_id`, `model_id`, `base_url`, `display_name`, `context_tokens`, `output_tokens`), then `pw9 key <key>`.
 
-  run              Dispatch a task (streaming output).
-  dispatch         Deterministic wrapper around run (two-line JSON: started + verdict).
-  fanout           Dispatch several jobs concurrently; stdout = one JSON array of verdicts.
-  template         Print the task template for a mode (code|explore|test|review).
-  install          Configure a worker for a host, or deploy/refresh a host's skill.
-                     install <provider> on <host> [for <mode>] [--global-key]
-                     install <host|all> [--target <dir>]
-                     install runner <name>
-  uninstall        Remove a worker from a host, an assignment, a key, or a whole host.
-                     uninstall <provider> on <host>
-                     uninstall for <mode> on <host>
-                     uninstall key <provider>
-                     uninstall <host|all>
-                     uninstall runner <name>
-  status           Show provider credentials, host installs, and runner state.
-                     status [--json]
-                     status <host>
-  maintain         Worker log, run-sandbox, and worktree lifecycle tools.
-                     maintain logs --older-than-days N
-                     maintain runs --older-than-days N [--keep M]
-                     maintain worktrees list|remove <path>
-```
+## Key Commands
 
-## Adding a new provider
-
-Drop a YAML file in `data/providers/` (inside the package):
-
-```yaml
-key: my-model
-provider_id: my-worker
-model_id: my-model-v1
-base_url: https://api.example.com/v1
-display_name: My Model Worker
-context_tokens: 128000
-output_tokens: 8192
-# runner: opencode          # optional, default opencode
-# permissions: relaxed      # optional, reference a permission profile
-# asset_prefix: my-model    # optional, default = key (legacy; no longer used for file naming)
-# strengths: ...            # optional, surfaced by `pilot-workers status`
-# suitable_modes: ...       # optional, surfaced by `pilot-workers status`
-# notes: ...                # optional, surfaced by `pilot-workers status`
-```
-
-Then `pilot-workers install my-model on claude --global-key` (or `codex`) to set its API key and deploy/refresh that host's playbook skill.
-
-Reserved keys (cannot be used as provider key): `runner`, `all`, `on`, `for`, `key`, `claude`, `codex`.
-
-## Host integration
-
-The **host** is whatever AI agent acts as the planner. Each host ships ONE `pilot-workers` playbook skill (a doctrine playbook, not provider-specific syntax) — a core `SKILL.md` plus five on-demand `modes/<mode>.md` playbooks, so triggering loads the core only and mode craft is read per dispatch:
-
-- **`claude-host/skills/pilot-workers/`**: playbook skill for Claude Code (installed to `~/.claude/skills/pilot-workers/`)
-- **`codex-host/skills/pilot-workers/`**: the same playbook skill for Codex (installed to `$CODEX_HOME/skills/pilot-workers/`)
-
-`pilot-workers install <provider> on <host>` copies the skill into the host's skill directory and regenerates its worker table from that host's configuration; the doctrine itself carries no engine-specific knowledge. The deployed tree is a build artifact — every install re-renders it from the packaged template, so upgrading is `pip` upgrade + `pilot-workers install <host|all>` (hosts with nothing configured are untouched). Removing the last provider deletes the skill, so a host with nothing configured has none and the planner does the work itself. (The v0.4.0 12-agents + 8-commands matrix is gone.)
-
-Adding a new host: create `integrations/<name>-host/skills/pilot-workers/`, put whatever config your host needs, point it at `pilot-workers dispatch`. See `integrations/README.md`.
-
-## Architecture
-
-See [CLAUDE.md](CLAUDE.md) for the current architecture, module reference, and conventions. See [docs/architecture.md](docs/architecture.md) for the detailed contract and security model.
+| Command | Description |
+|---------|-------------|
+| `pw9 key <provider>` | Configure API key |
+| `pw9 status [--json]` | Provider credentials + runner state |
+| `pw9 run --provider <key> --mode <mode> --workdir <dir> --task-file <file>` | Dispatch a single task |
+| `pw9 dispatch ...` | Like `run`, but stdout = two JSON lines (started + verdict) |
+| `pw9 fanout --workdir <dir> --job <provider:mode:file> ...` | Dispatch several jobs concurrently |
+| `pw9 review --provider <key> --workdir <dir>` | Auto-fanout code review by axes |
+| `pw9 test --provider <key> --workdir <dir>` | Auto-fanout test execution by layers |
+| `pw9 review show/add/edit/remove` | Manage review axes |
+| `pw9 test show/add/edit/remove` | Manage test layers |
+| `pw9 permissions add/remove/show <provider> ...` | Per-provider shell permission overrides |
+| `pw9 template <mode>` | Print the task template for a mode |
+| `pw9 install runner opencode` | Install the worker runtime |
+| `pw9 uninstall key <provider>` | Remove an API key |
 
 ## Development
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest    # the whole suite, offline
+.venv/bin/pytest
 ```
 
 ## License

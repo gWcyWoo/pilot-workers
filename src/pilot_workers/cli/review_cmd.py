@@ -12,7 +12,7 @@ import os
 import subprocess
 import sys
 import tempfile
-import time
+
 from pathlib import Path
 
 from pilot_workers import strategies
@@ -114,8 +114,12 @@ def _cmd_edit(name: str | None) -> int:
                 current_focus.append(line)
         if current_name:
             parsed.append((current_name, "\n".join(current_focus).strip()))
+        parsed_names = {n for n, _ in parsed}
         for n, f in parsed:
             strategies.edit_item(_MODE, n, f)
+        for item in items:
+            if item["name"] not in parsed_names:
+                strategies.remove_item(_MODE, item["name"])
         print(f"  updated {len(parsed)} axes")
         return 0
     # Edit a single axis.
@@ -297,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     provider = None
     workdir = None
     timeout = 900
+    dry_run = False
     i = 0
     while i < len(args):
         if args[i] == "--provider" and i + 1 < len(args):
@@ -314,15 +319,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             i += 2
         elif args[i] == "--dry-run":
-            # Show what would be dispatched.
-            axes = strategies.effective(_MODE)
-            print(json.dumps({
-                "mode": "review",
-                "provider": provider,
-                "axes": [a["name"] for a in axes],
-                "workdir": workdir,
-            }, indent=2))
-            return 0
+            dry_run = True
+            i += 1
         else:
             print(f"error: unexpected argument: {args[i]}", file=sys.stderr)
             print(USAGE, end="", file=sys.stderr)
@@ -331,5 +329,15 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --provider and --workdir are required", file=sys.stderr)
         print(USAGE, end="", file=sys.stderr)
         return 2
+
+    if dry_run:
+        axes = strategies.effective(_MODE)
+        print(json.dumps({
+            "mode": "review",
+            "provider": provider,
+            "axes": [a["name"] for a in axes],
+            "workdir": workdir,
+        }, indent=2))
+        return 0
 
     return _cmd_run(provider, workdir, timeout)

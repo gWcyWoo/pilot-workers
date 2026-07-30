@@ -89,11 +89,13 @@ def effective(mode: str) -> list[dict[str, str]]:
 def add_item(mode: str, name: str, focus: str) -> None:
     """Add or replace a user-level item."""
     overrides = load_overrides(mode)
-    added = [i for i in overrides["added"] if i.get("name") != name]
+    added = [i for i in overrides["added"]
+             if isinstance(i, dict) and i.get("name") != name]
     added.append({"name": name, "focus": focus})
     overrides["added"] = added
     # Adding back something that was removed: un-remove it.
-    overrides["removed"] = [n for n in overrides["removed"] if n != name]
+    overrides["removed"] = [n for n in overrides.get("removed", [])
+                            if isinstance(n, str) and n != name]
     save_overrides(mode, overrides)
 
 
@@ -102,14 +104,16 @@ def remove_item(mode: str, name: str) -> bool:
     defaults = _load_default(mode)
     overrides = load_overrides(mode)
     default_names = {item["name"] for item in defaults}
-    # Remove from user additions.
-    before = len(overrides["added"])
-    overrides["added"] = [i for i in overrides["added"]
-                          if i.get("name") != name]
-    changed = len(overrides["added"]) < before
+    added = [i for i in overrides.get("added", []) if isinstance(i, dict)]
+    before = len(added)
+    added = [i for i in added if i.get("name") != name]
+    overrides["added"] = added
+    changed = len(added) < before
     # If it's a default, mark it removed.
-    if name in default_names and name not in overrides["removed"]:
-        overrides["removed"].append(name)
+    removed = [n for n in overrides.get("removed", []) if isinstance(n, str)]
+    if name in default_names and name not in removed:
+        removed.append(name)
+        overrides["removed"] = removed
         changed = True
     if changed:
         # Clean up: empty overrides → delete the file.
