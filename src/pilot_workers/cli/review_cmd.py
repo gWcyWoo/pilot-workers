@@ -233,9 +233,9 @@ def _cmd_run(provider: str, workdir: str, timeout: int) -> int:
               file=sys.stderr)
         return 1
 
-    print(f"review: {len(axes)} axes × provider {provider}")
+    print(f"review: {len(axes)} axes × provider {provider}", file=sys.stderr)
     for ax in axes:
-        print(f"  → {ax['name']}")
+        print(f"  → {ax['name']}", file=sys.stderr)
 
     # Generate task files.
     task_files: list[str] = []
@@ -306,7 +306,12 @@ def main(argv: list[str] | None = None) -> int:
             workdir = args[i + 1]
             i += 2
         elif args[i] == "--timeout" and i + 1 < len(args):
-            timeout = int(args[i + 1])
+            try:
+                timeout = int(args[i + 1])
+            except ValueError:
+                print(f"error: --timeout requires an integer, got {args[i + 1]!r}",
+                      file=sys.stderr)
+                return 2
             i += 2
         elif args[i] == "--dry-run":
             # Show what would be dispatched.

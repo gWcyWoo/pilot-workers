@@ -217,9 +217,9 @@ def _cmd_run(provider: str, workdir: str, timeout: int) -> int:
               file=sys.stderr)
         return 1
 
-    print(f"test: {len(layers)} layers × provider {provider}")
+    print(f"test: {len(layers)} layers × provider {provider}", file=sys.stderr)
     for ly in layers:
-        print(f"  → {ly['name']}")
+        print(f"  → {ly['name']}", file=sys.stderr)
 
     task_files: list[str] = []
     for layer in layers:
@@ -286,7 +286,12 @@ def main(argv: list[str] | None = None) -> int:
             workdir = args[i + 1]
             i += 2
         elif args[i] == "--timeout" and i + 1 < len(args):
-            timeout = int(args[i + 1])
+            try:
+                timeout = int(args[i + 1])
+            except ValueError:
+                print(f"error: --timeout requires an integer, got {args[i + 1]!r}",
+                      file=sys.stderr)
+                return 2
             i += 2
         elif args[i] == "--dry-run":
             layers = strategies.effective(_MODE)
