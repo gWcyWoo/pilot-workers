@@ -14,6 +14,7 @@ subcommands:
   dispatch     Deterministic outer shell around run (started + verdict JSON).
   fanout       Dispatch several jobs concurrently; stdout = one JSON array of verdicts.
   template     Print the task template for a mode (code|explore|test|review).
+  init         Generate a pw9 skill file in the current project.
   install      Install the worker runtime (pw9 install runner opencode).
   uninstall    Remove a runner or API key.
   key          Configure a provider's API key (pw9 key <provider>).
@@ -87,6 +88,11 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         sys.stdout.write(path.read_text(encoding="utf-8"))
         return 0
+
+    if subcommand == "init":
+        from pilot_workers.cli.init_cmd import main as init_main
+
+        return init_main(rest)
 
     if subcommand == "install":
         from pilot_workers.cli.install import main as install_main

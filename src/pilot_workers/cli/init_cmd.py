@@ -1,0 +1,161 @@
+"""pw9 init — generate a project-level skill file.
+
+Reads the current provider configuration and credential status, renders
+a skill markdown with an intent→command mapping table, and writes it to
+the project's skill directory (.claude/skills/pw9.md).
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+from pilot_workers import providers
+from pilot_workers.runners import get_runner
+from pilot_workers import runtime
+
+USAGE = """usage: pw9 init [--target <dir>]
+
+Generate a pw9 skill file in the current project so the AI host knows
+what pw9 commands are available and how to call them. Writes to
+.claude/skills/pw9.md (override with --target).
+"""
+
+
+def _credential_ok(provider_key: str) -> bool:
+    try:
+        provider = providers.PROVIDERS[provider_key]
+        runner = get_runner(provider.runner)
+        meta = runtime.credential_metadata(provider, runner)
+        return meta["configured"]
+    except (KeyError, OSError, RuntimeError):
+        return False
+
+
+def _render_skill() -> str:
+    ready: list[dict] = []
+    for key in sorted(providers.PROVIDERS):
+        if not _credential_ok(key):
+            continue
+        provider = providers.PROVIDERS[key]
+        modes = [m.strip() for m in provider.suitable_modes.split(",") if m.strip()]
+        ready.append({"key": key, "modes": modes, "strengths": provider.strengths})
+
+    if not ready:
+        return ""
+
+    lines = [
+        "---",
+        "name: pw9",
+        "description: Worker dispatch tool — use it when asked to review, test, explore, or delegate code tasks to a worker provider.",
+        "---",
+        "",
+        "# pw9 — Available Worker Commands",
+        "",
+        "This project has `pw9` configured with the following providers.",
+        "When the user asks to use a provider by name, or asks for review/test/explore/code",
+        "and names a provider, translate the request into the matching pw9 command.",
+        "",
+        "## Providers",
+        "",
+        "| Provider | Strengths | Suitable modes |",
+        "| --- | --- | --- |",
+    ]
+    for p in ready:
+        lines.append(f"| {p['key']} | {p['strengths']} | {', '.join(p['modes'])} |")
+
+    lines.append("")
+    lines.append("## Commands")
+    lines.append("")
+
+    for p in ready:
+        key = p["key"]
+        modes = p["modes"]
+
+        if "review" in modes:
+            lines.append(f'- **"{key} review" / "用 {key} review"**')
+            lines.append(f"  ```bash")
+            lines.append(f'  pw9 review --provider {key} --workdir "$PWD"')
+            lines.append(f"  ```")
+            lines.append(f"  Auto-splits into {_axis_count()} axes and runs in parallel. No task file needed.")
+            lines.append("")
+
+        if "test" in modes:
+            lines.append(f'- **"{key} 测试" / "用 {key} 跑测试"**')
+            lines.append(f"  ```bash")
+            lines.append(f'  pw9 test --provider {key} --workdir "$PWD"')
+            lines.append(f"  ```")
+            lines.append(f"  Auto-splits into test layers and runs in parallel. No task file needed.")
+            lines.append("")
+
+        if "code" in modes:
+            lines.append(f'- **"{key} 写代码" / "用 {key} 实现 X"**')
+            lines.append(f"  ```bash")
+            lines.append(f'  pw9 template code > /tmp/{key}-code-task.md  # fill it in')
+            lines.append(f'  pw9 dispatch --provider {key} --mode code --workdir "$PWD" --task-file /tmp/{key}-code-task.md')
+            lines.append(f"  ```")
+            lines.append(f"  Needs a task file — use `pw9 template code` to generate one, fill it in, then dispatch.")
+            lines.append("")
+
+        if "explore" in modes:
+            lines.append(f'- **"{key} 探索" / "用 {key} 看看 X"**')
+            lines.append(f"  ```bash")
+            lines.append(f'  pw9 template explore > /tmp/{key}-explore-task.md  # fill it in')
+            lines.append(f'  pw9 dispatch --provider {key} --mode explore --workdir "$PWD" --task-file /tmp/{key}-explore-task.md')
+            lines.append(f"  ```")
+            lines.append(f"  Needs a task file — use `pw9 template explore` to generate one.")
+            lines.append("")
+
+    lines.append("## Notes")
+    lines.append("")
+    lines.append("- `review` and `test` run in the foreground and print a JSON verdict array to stdout.")
+    lines.append("- `dispatch` prints two JSON lines (started + verdict) — run in a background Bash.")
+    lines.append("- All commands run against the current workdir. Workers cannot see this conversation.")
+    lines.append("- Never put credentials in a task file.")
+    lines.append("")
+
+    return "\n".join(lines) + "\n"
+
+
+def _axis_count() -> int:
+    from pilot_workers import strategies
+    return len(strategies.effective("review"))
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+
+    if args and args[0] in ("-h", "--help"):
+        print(USAGE, end="")
+        return 0
+
+    target = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--target" and i + 1 < len(args):
+            target = Path(args[i + 1])
+            i += 2
+        else:
+            print(f"error: unexpected argument: {args[i]}", file=sys.stderr)
+            print(USAGE, end="", file=sys.stderr)
+            return 2
+
+    content = _render_skill()
+    if not content:
+        print("error: no providers have API keys configured; run 'pw9 key <provider>' first",
+              file=sys.stderr)
+        return 1
+
+    if target is None:
+        target = Path.cwd() / ".claude"
+    skill_dir = target / "skills"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_path = skill_dir / "pw9.md"
+    skill_path.write_text(content, encoding="utf-8")
+    print(f"  wrote {skill_path}")
+    print(f"  {_provider_count()} providers, ready to use")
+    return 0
+
+
+def _provider_count() -> int:
+    return sum(1 for k in providers.PROVIDERS if _credential_ok(k))
