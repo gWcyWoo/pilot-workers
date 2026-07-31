@@ -108,18 +108,18 @@ def _render_skill() -> str:
             lines.append("")
 
         if "explore" in modes:
-            lines.append(f'- **"{key} 探索" / "用 {key} 看看 X"**')
+            lines.append(f'- **"{key} 探索 X" / "用 {key} 看看 X"**')
             lines.append(f"  ```bash")
-            lines.append(f'  pw9 template explore > /tmp/{key}-explore-task.md  # fill it in')
-            lines.append(f'  pw9 dispatch --provider {key} --mode explore --workdir "$PWD" --task-file /tmp/{key}-explore-task.md')
+            lines.append(f'  pw9 explore --provider {key} --workdir "$PWD" --requirement "描述要探索的内容"')
             lines.append(f"  ```")
-            lines.append(f"  Needs a task file — use `pw9 template explore` to generate one.")
+            lines.append(f"  Auto-splits into {_lens_count()} lenses (flow/constraints/impact/abstraction) and runs in parallel. Also supports `--requirement-file <path>`.")
             lines.append("")
 
     lines.append("## Notes")
     lines.append("")
-    lines.append("- `review` and `test` run in the foreground and print a JSON verdict array to stdout.")
+    lines.append("- `review`, `test`, and `explore` run in the foreground and print a JSON verdict array to stdout.")
     lines.append("- `dispatch` prints two JSON lines (started + verdict) — run in a background Bash.")
+    lines.append("- `--provider` accepts comma-separated keys for cross-model dispatch: `--provider ds,glm,kimi-k3` round-robins across providers.")
     lines.append("- All commands run against the current workdir. Workers cannot see this conversation.")
     lines.append("- Never put credentials in a task file.")
     lines.append("")
@@ -130,6 +130,11 @@ def _render_skill() -> str:
 def _axis_count() -> int:
     from pilot_workers import strategies
     return len(strategies.effective("review"))
+
+
+def _lens_count() -> int:
+    from pilot_workers import strategies
+    return len(strategies.effective("explore"))
 
 
 def _write_skill(host: str, content: str) -> None:
