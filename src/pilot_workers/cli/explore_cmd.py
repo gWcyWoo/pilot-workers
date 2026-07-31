@@ -1,6 +1,6 @@
 """pw9 explore — auto-fanout exploration by configured lenses.
 
-``pw9 explore --provider ds,glm --workdir . --requirement "支付回调改异步"``
+``pw9 explore --provider ds,glm --workdir . --requirement "refactor payment callback to async"``
 generates one task file per lens (flow / constraints / impact / abstraction),
 round-robin assigns providers, and fanouts them in parallel.
 """

@@ -83,7 +83,7 @@ def _render_skill() -> str:
         modes = p["modes"]
 
         if "review" in modes:
-            lines.append(f'- **"{key} review" / "用 {key} review"**')
+            lines.append(f'- **"review with {key}" / "use {key} to review"**')
             lines.append(f"  ```bash")
             lines.append(f'  pw9 review --provider {key} --workdir "$PWD"')
             lines.append(f"  ```")
@@ -91,7 +91,7 @@ def _render_skill() -> str:
             lines.append("")
 
         if "test" in modes:
-            lines.append(f'- **"{key} 测试" / "用 {key} 跑测试"**')
+            lines.append(f'- **"test with {key}" / "use {key} to run tests"**')
             lines.append(f"  ```bash")
             lines.append(f'  pw9 test --provider {key} --workdir "$PWD"')
             lines.append(f"  ```")
@@ -99,18 +99,18 @@ def _render_skill() -> str:
             lines.append("")
 
         if "code" in modes:
-            lines.append(f'- **"{key} 写代码" / "用 {key} 实现 X"**')
+            lines.append(f'- **"code with {key}" / "use {key} to implement X"**')
             lines.append(f"  ```bash")
             lines.append(f'  pw9 template code > /tmp/{key}-code-task.md  # fill it in')
             lines.append(f'  pw9 dispatch --provider {key} --mode code --workdir "$PWD" --task-file /tmp/{key}-code-task.md')
             lines.append(f"  ```")
-            lines.append(f"  Needs a task file — use `pw9 template code` to generate one, fill it in, then dispatch.")
+            lines.append(f"  Requires a task file — run `pw9 template code` to generate one, fill it in, then dispatch.")
             lines.append("")
 
         if "explore" in modes:
-            lines.append(f'- **"{key} 探索 X" / "用 {key} 看看 X"**')
+            lines.append(f'- **"explore with {key}" / "use {key} to investigate X"**')
             lines.append(f"  ```bash")
-            lines.append(f'  pw9 explore --provider {key} --workdir "$PWD" --requirement "描述要探索的内容"')
+            lines.append(f'  pw9 explore --provider {key} --workdir "$PWD" --requirement "describe what to explore"')
             lines.append(f"  ```")
             lines.append(f"  Auto-splits into {_lens_count()} lenses (flow/constraints/impact/abstraction) and runs in parallel. Also supports `--requirement-file <path>`.")
             lines.append("")
