@@ -21,6 +21,7 @@ STRATEGIES_DIR = Path(__file__).resolve().parent / "data" / "strategies"
 MODE_LIST_KEY = {
     "review": "axes",
     "test": "layers",
+    "explore": "lenses",
 }
 
 

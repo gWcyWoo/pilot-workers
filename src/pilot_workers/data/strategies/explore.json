@@ -1,0 +1,8 @@
+{
+  "lenses": [
+    {"name": "flow", "focus": "How the flow under change runs today: entry point, the components it passes through, where the boundaries between them sit. Report the path with file:line references."},
+    {"name": "constraints", "focus": "For each capability this change needs (HTTP, storage, auth, caching, ...), what already exists in the project that the new code must fit into. Report module paths, interfaces, and usage patterns."},
+    {"name": "impact", "focus": "What other modules will be affected by this change: callers, dependents, downstream consumers, tests that assert current behavior. Report each with file:line and how it depends."},
+    {"name": "abstraction", "focus": "If the change involves logic that already exists elsewhere: where the duplicates sit, how the copies differ, and what patterns this project already uses for similar abstractions."}
+  ]
+}
