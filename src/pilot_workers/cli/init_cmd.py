@@ -22,14 +22,13 @@ what pw9 commands are available and how to call them.
 
   pw9 init                  # default: claude
   pw9 init --target claude  # .claude/skills/pw9.md
-  pw9 init --target codex   # $CODEX_HOME/skills/pw9.md (or .codex/skills/)
+  pw9 init --target codex   # .codex/skills/pw9.md (project-level)
   pw9 init --target all     # both
 """
 
 HOSTS = {
     "claude": lambda: Path.cwd() / ".claude",
-    "codex": lambda: Path(
-        os.environ.get("CODEX_HOME", Path.home() / ".codex")),
+    "codex": lambda: Path.cwd() / ".codex",
 }
 
 
