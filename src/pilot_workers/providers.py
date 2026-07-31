@@ -170,16 +170,65 @@ def load_providers(providers_dir: Path | None = None) -> dict[str, Provider]:
     return providers
 
 
-# Eagerly loaded at import time for backwards compatibility with existing code
-# that does `from providers import PROVIDERS`. Callers that need a custom
-# directory can call load_providers() directly.
-PROVIDERS = load_providers()
-
-
 def pilot_home() -> Path:
     """Root for all pilot-workers runtime data (credentials, logs, worktrees)."""
     return Path(os.environ.get("PILOT_WORKERS_HOME",
                 os.environ.get("CODEX_HOME", Path.home() / ".codex"))).expanduser().resolve()
+
+
+def user_providers_dir() -> Path:
+    """User-level provider overrides, outside package data."""
+    return pilot_home() / "providers"
+
+
+def _load_user_overrides() -> dict[str, Provider]:
+    """Load user-level provider YAMLs that override or extend package defaults."""
+    d = user_providers_dir()
+    if not d.is_dir():
+        return {}
+    result: dict[str, Provider] = {}
+    for path in sorted(d.glob("*.yaml")):
+        data = _parse_yaml(path)
+        if "key" not in data:
+            continue
+        if not isinstance(data["key"], str):
+            continue
+        if data["key"] in RESERVED_PROVIDER_KEYS:
+            continue
+        required = ("key", "provider_id", "model_id", "base_url", "display_name",
+                     "context_tokens", "output_tokens")
+        missing = [f for f in required if f not in data]
+        if missing:
+            continue
+        result[data["key"]] = Provider(
+            key=data["key"],
+            provider_id=data["provider_id"],
+            model_id=data["model_id"],
+            base_url=data["base_url"],
+            display_name=data["display_name"],
+            context_tokens=_require_int(data["context_tokens"], "context_tokens", path),
+            output_tokens=_require_int(data["output_tokens"], "output_tokens", path),
+            permissions=data.get("permissions") or None,
+            runner=data.get("runner") or "opencode",
+            asset_prefix=data.get("asset_prefix") or data["key"],
+            strengths=str(data.get("strengths") or ""),
+            suitable_modes=str(data.get("suitable_modes") or ""),
+            notes=str(data.get("notes") or ""),
+        )
+    return result
+
+
+def _merge_providers() -> dict[str, Provider]:
+    """Package defaults + user overrides (user wins on same key)."""
+    base = load_providers()
+    base.update(_load_user_overrides())
+    return base
+
+
+# Eagerly loaded at import time for backwards compatibility with existing code
+# that does `from providers import PROVIDERS`. Callers that need a custom
+# directory can call load_providers() directly.
+PROVIDERS = _merge_providers()
 
 
 def workers_root() -> Path:

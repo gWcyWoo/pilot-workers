@@ -20,6 +20,7 @@ subcommands:
   key          Configure a provider's API key (pw9 key <provider>).
   status       Provider API keys, runner state [--json].
   permissions  Per-provider permission overrides: add/remove/show rules.
+  provider     Manage provider configurations (add/edit/remove/show).
   review       Auto-fanout code review by configured axes (add/edit/remove/show).
   test         Auto-fanout test execution by configured layers (add/edit/remove/show).
   maintain     Worker log, sandbox and worktree lifecycle tools.
@@ -122,6 +123,11 @@ def main(argv: list[str] | None = None) -> int:
         from pilot_workers.cli.permissions import main as permissions_main
 
         return permissions_main(rest)
+
+    if subcommand == "provider":
+        from pilot_workers.cli.provider_cmd import main as provider_main
+
+        return provider_main(rest)
 
     if subcommand == "review":
         from pilot_workers.cli.review_cmd import main as review_main
