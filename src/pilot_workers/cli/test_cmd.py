@@ -19,11 +19,13 @@ from pilot_workers import strategies
 from pilot_workers.providers import PROVIDERS
 
 USAGE = """usage:
-  pw9 test --provider <key> --workdir <dir> [--timeout <sec>]
+  pw9 test --provider <key>[,<key>,...] --workdir <dir> [--timeout <sec>]
   pw9 test add <name>             # opens $EDITOR to write the focus
   pw9 test edit [<name>]          # edit one layer or the whole config
   pw9 test remove <name>
   pw9 test show
+
+Multiple providers are round-robin assigned across layers.
 """
 
 _MODE = "test"
@@ -216,10 +218,11 @@ Project at {workdir}.
     return path_str
 
 
-def _cmd_run(provider: str, workdir: str, timeout: int) -> int:
-    if provider not in PROVIDERS:
-        print(f"error: unknown provider: {provider}", file=sys.stderr)
-        return 2
+def _cmd_run(provider_list: list[str], workdir: str, timeout: int) -> int:
+    for p in provider_list:
+        if p not in PROVIDERS:
+            print(f"error: unknown provider: {p}", file=sys.stderr)
+            return 2
     workdir_path = Path(workdir).resolve()
     if not workdir_path.is_dir():
         print(f"error: workdir not found: {workdir}", file=sys.stderr)
@@ -231,17 +234,21 @@ def _cmd_run(provider: str, workdir: str, timeout: int) -> int:
               file=sys.stderr)
         return 1
 
-    print(f"test: {len(layers)} layers × provider {provider}", file=sys.stderr)
-    for ly in layers:
-        print(f"  → {ly['name']}", file=sys.stderr)
+    label = ",".join(provider_list)
+    print(f"test: {len(layers)} layers × {len(provider_list)} provider(s) ({label})",
+          file=sys.stderr)
+    for i, ly in enumerate(layers):
+        p = provider_list[i % len(provider_list)]
+        print(f"  → {ly['name']} ({p})", file=sys.stderr)
 
     task_files: list[str] = []
     for layer in layers:
         task_files.append(_generate_task(layer, str(workdir_path)))
 
     fanout_argv = ["--workdir", str(workdir_path)]
-    for tf in task_files:
-        fanout_argv.extend(["--job", f"{provider}:test:{tf}"])
+    for i, tf in enumerate(task_files):
+        p = provider_list[i % len(provider_list)]
+        fanout_argv.extend(["--job", f"{p}:test:{tf}"])
     fanout_argv.extend(["--timeout", str(timeout)])
 
     from pilot_workers.cli.fanout import main as fanout_main
@@ -328,18 +335,24 @@ def _dispatch(verb: str, args: list[str]) -> int:
         print(USAGE, end="", file=sys.stderr)
         return 2
 
-    if provider not in PROVIDERS:
-        print(f"error: unknown provider: {provider}", file=sys.stderr)
-        return 2
+    provider_list = [p.strip() for p in provider.split(",") if p.strip()]
+    for p in provider_list:
+        if p not in PROVIDERS:
+            print(f"error: unknown provider: {p}", file=sys.stderr)
+            return 2
 
     if dry_run:
         layers = strategies.effective(_MODE)
+        plan = []
+        for i, l in enumerate(layers):
+            plan.append({"layer": l["name"],
+                         "provider": provider_list[i % len(provider_list)]})
         print(json.dumps({
             "mode": "test",
-            "provider": provider,
-            "layers": [l["name"] for l in layers],
+            "providers": provider_list,
+            "plan": plan,
             "workdir": workdir,
         }, indent=2))
         return 0
 
-    return _cmd_run(provider, workdir, timeout)
+    return _cmd_run(provider_list, workdir, timeout)

@@ -19,11 +19,13 @@ from pilot_workers import strategies
 from pilot_workers.providers import PROVIDERS
 
 USAGE = """usage:
-  pw9 review --provider <key> --workdir <dir> [--timeout <sec>]
+  pw9 review --provider <key>[,<key>,...] --workdir <dir> [--timeout <sec>]
   pw9 review add <name>            # opens $EDITOR to write the focus
   pw9 review edit [<name>]         # edit one axis or the whole config
   pw9 review remove <name>
   pw9 review show
+
+Multiple providers are round-robin assigned across axes for cross-model review.
 """
 
 _MODE = "review"
@@ -232,10 +234,11 @@ none
     return path_str
 
 
-def _cmd_run(provider: str, workdir: str, timeout: int) -> int:
-    if provider not in PROVIDERS:
-        print(f"error: unknown provider: {provider}", file=sys.stderr)
-        return 2
+def _cmd_run(provider_list: list[str], workdir: str, timeout: int) -> int:
+    for p in provider_list:
+        if p not in PROVIDERS:
+            print(f"error: unknown provider: {p}", file=sys.stderr)
+            return 2
     workdir_path = Path(workdir).resolve()
     if not workdir_path.is_dir():
         print(f"error: workdir not found: {workdir}", file=sys.stderr)
@@ -247,19 +250,21 @@ def _cmd_run(provider: str, workdir: str, timeout: int) -> int:
               file=sys.stderr)
         return 1
 
-    print(f"review: {len(axes)} axes × provider {provider}", file=sys.stderr)
-    for ax in axes:
-        print(f"  → {ax['name']}", file=sys.stderr)
+    label = ",".join(provider_list)
+    print(f"review: {len(axes)} axes × {len(provider_list)} provider(s) ({label})",
+          file=sys.stderr)
+    for i, ax in enumerate(axes):
+        p = provider_list[i % len(provider_list)]
+        print(f"  → {ax['name']} ({p})", file=sys.stderr)
 
-    # Generate task files.
     task_files: list[str] = []
     for axis in axes:
         task_files.append(_generate_task(axis, str(workdir_path)))
 
-    # Build fanout args.
     fanout_argv = ["--workdir", str(workdir_path)]
-    for tf in task_files:
-        fanout_argv.extend(["--job", f"{provider}:review:{tf}"])
+    for i, tf in enumerate(task_files):
+        p = provider_list[i % len(provider_list)]
+        fanout_argv.extend(["--job", f"{p}:review:{tf}"])
     fanout_argv.extend(["--timeout", str(timeout)])
 
     from pilot_workers.cli.fanout import main as fanout_main
@@ -348,18 +353,24 @@ def _dispatch(verb: str, args: list[str]) -> int:
         print(USAGE, end="", file=sys.stderr)
         return 2
 
-    if provider not in PROVIDERS:
-        print(f"error: unknown provider: {provider}", file=sys.stderr)
-        return 2
+    provider_list = [p.strip() for p in provider.split(",") if p.strip()]
+    for p in provider_list:
+        if p not in PROVIDERS:
+            print(f"error: unknown provider: {p}", file=sys.stderr)
+            return 2
 
     if dry_run:
         axes = strategies.effective(_MODE)
+        plan = []
+        for i, a in enumerate(axes):
+            plan.append({"axis": a["name"],
+                         "provider": provider_list[i % len(provider_list)]})
         print(json.dumps({
             "mode": "review",
-            "provider": provider,
-            "axes": [a["name"] for a in axes],
+            "providers": provider_list,
+            "plan": plan,
             "workdir": workdir,
         }, indent=2))
         return 0
 
-    return _cmd_run(provider, workdir, timeout)
+    return _cmd_run(provider_list, workdir, timeout)
