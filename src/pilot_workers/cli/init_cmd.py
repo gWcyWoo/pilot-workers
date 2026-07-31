@@ -21,8 +21,8 @@ Generate a pw9 skill file in the current project so the AI host knows
 what pw9 commands are available and how to call them.
 
   pw9 init                  # default: claude
-  pw9 init --target claude  # .claude/skills/pw9.md
-  pw9 init --target codex   # .codex/skills/pw9.md (project-level)
+  pw9 init --target claude  # .claude/skills/pw9/SKILL.md
+  pw9 init --target codex   # .codex/skills/pw9/SKILL.md
   pw9 init --target all     # both
 """
 
@@ -134,9 +134,9 @@ def _axis_count() -> int:
 
 def _write_skill(host: str, content: str) -> None:
     base = HOSTS[host]()
-    skill_dir = base / "skills"
+    skill_dir = base / "skills" / "pw9"
     skill_dir.mkdir(parents=True, exist_ok=True)
-    skill_path = skill_dir / "pw9.md"
+    skill_path = skill_dir / "SKILL.md"
     skill_path.write_text(content, encoding="utf-8")
     print(f"  wrote {skill_path}")
 
