@@ -7,6 +7,7 @@ the project's skill directory (.claude/skills/pw9.md).
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -14,12 +15,22 @@ from pilot_workers import providers
 from pilot_workers.runners import get_runner
 from pilot_workers import runtime
 
-USAGE = """usage: pw9 init [--target <dir>]
+USAGE = """usage: pw9 init [--target claude|codex|all]
 
 Generate a pw9 skill file in the current project so the AI host knows
-what pw9 commands are available and how to call them. Writes to
-.claude/skills/pw9.md (override with --target).
+what pw9 commands are available and how to call them.
+
+  pw9 init                  # default: claude
+  pw9 init --target claude  # .claude/skills/pw9.md
+  pw9 init --target codex   # $CODEX_HOME/skills/pw9.md (or .codex/skills/)
+  pw9 init --target all     # both
 """
+
+HOSTS = {
+    "claude": lambda: Path.cwd() / ".claude",
+    "codex": lambda: Path(
+        os.environ.get("CODEX_HOME", Path.home() / ".codex")),
+}
 
 
 def _credential_ok(provider_key: str) -> bool:
@@ -122,6 +133,15 @@ def _axis_count() -> int:
     return len(strategies.effective("review"))
 
 
+def _write_skill(host: str, content: str) -> None:
+    base = HOSTS[host]()
+    skill_dir = base / "skills"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_path = skill_dir / "pw9.md"
+    skill_path.write_text(content, encoding="utf-8")
+    print(f"  wrote {skill_path}")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
@@ -129,16 +149,21 @@ def main(argv: list[str] | None = None) -> int:
         print(USAGE, end="")
         return 0
 
-    target = None
+    target = "claude"
     i = 0
     while i < len(args):
         if args[i] == "--target" and i + 1 < len(args):
-            target = Path(args[i + 1])
+            target = args[i + 1]
             i += 2
         else:
             print(f"error: unexpected argument: {args[i]}", file=sys.stderr)
             print(USAGE, end="", file=sys.stderr)
             return 2
+
+    if target not in (*HOSTS, "all"):
+        print(f"error: unknown target: {target} (expected claude, codex, or all)",
+              file=sys.stderr)
+        return 2
 
     content = _render_skill()
     if not content:
@@ -146,13 +171,9 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 1
 
-    if target is None:
-        target = Path.cwd() / ".claude"
-    skill_dir = target / "skills"
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    skill_path = skill_dir / "pw9.md"
-    skill_path.write_text(content, encoding="utf-8")
-    print(f"  wrote {skill_path}")
+    hosts = list(HOSTS) if target == "all" else [target]
+    for host in hosts:
+        _write_skill(host, content)
     print(f"  {_provider_count()} providers, ready to use")
     return 0
 
