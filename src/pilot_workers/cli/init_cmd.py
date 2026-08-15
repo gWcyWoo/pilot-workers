@@ -114,6 +114,18 @@ def _render_skill() -> str:
             lines.append(f"  Auto-splits into {_lens_count()} lenses (flow/constraints/impact/abstraction) and runs in parallel. Also supports `--requirement-file <path>`.")
             lines.append("")
 
+    if len(ready) > 1:
+        keys = ",".join(p["key"] for p in ready)
+        lines.append('- **"what do the models think about X" / "get a second opinion"**')
+        lines.append(f"  ```bash")
+        lines.append(f'  pw9 discuss --provider {keys} --workdir "$PWD" --question "..."')
+        lines.append(f"  ```")
+        lines.append(f"  Each provider answers independently and cannot see the others."
+                     f" The output is their positions and where they SPLIT — not a merged")
+        lines.append(f"  conclusion. You decide; run another round with `--rebut <file>`"
+                     f" if it is worth it.")
+        lines.append("")
+
     lines.append("## When NOT to dispatch")
     lines.append("")
     lines.append("Delegating is not free: a worker cannot see this conversation, so")

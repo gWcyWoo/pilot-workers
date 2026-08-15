@@ -29,17 +29,19 @@ from pilot_workers.providers import Provider
 
 PERMISSIONS_DIR = Path(__file__).resolve().parent / "data" / "permissions"
 
-VALID_MODES = ("code", "explore", "test", "review")
+VALID_MODES = ("code", "explore", "test", "review", "discuss")
 
 MODE_TO_AGENT = {
     "code": "worker-code",
     "explore": "worker-explore",
     "test": "worker-test",
     "review": "worker-review",
+    "discuss": "worker-discuss",
     "resume": "worker-code",
 }
 
-STEPS_BY_MODE = {"code": 120, "resume": 120, "review": 120, "explore": 80, "test": 80}
+STEPS_BY_MODE = {"code": 120, "resume": 120, "review": 120, "explore": 80,
+                 "test": 80, "discuss": 80}
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 

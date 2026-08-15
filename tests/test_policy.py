@@ -25,6 +25,7 @@ def test_mode_to_agent_mapping():
         "explore": "worker-explore",
         "test": "worker-test",
         "review": "worker-review",
+        "discuss": "worker-discuss",
         "resume": "worker-code",
     }
 
@@ -36,6 +37,7 @@ def test_steps_by_mode_values():
         "review": 120,
         "explore": 80,
         "test": 80,
+        "discuss": 80,
     }
 
 

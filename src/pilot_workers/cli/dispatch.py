@@ -252,6 +252,39 @@ def _is_str_list(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
+def _validate_discuss_result(payload: Any) -> bool:
+    """A position, why, and what would overturn it.
+
+    `choice` is nullable on purpose: an open-ended question ("how should
+    this be structured") names no options to pick between, and forcing one
+    would make the worker invent a false dichotomy. `would_change_if` is
+    NOT optional — it is the field that makes disagreement actionable, by
+    telling the planner which evidence is worth going to find.
+    """
+    if not isinstance(payload, dict):
+        return False
+    position = payload.get("position")
+    if not isinstance(position, str) or not position.strip():
+        return False
+    choice = payload.get("choice")
+    if choice is not None and not isinstance(choice, str):
+        return False
+    reasoning = payload.get("reasoning")
+    if not isinstance(reasoning, list) or not reasoning:
+        return False
+    for item in reasoning:
+        if not isinstance(item, dict):
+            return False
+        if not isinstance(item.get("point"), str):
+            return False
+        if not isinstance(item.get("evidence"), str):
+            return False
+    if not isinstance(payload.get("risks"), str):
+        return False
+    changer = payload.get("would_change_if")
+    return isinstance(changer, str) and bool(changer.strip())
+
+
 def _validate_explore_result(payload: Any) -> bool:
     if not isinstance(payload, dict):
         return False
@@ -429,6 +462,7 @@ _RESULT_VALIDATORS = {
     "code": _validate_code_result,
     "test": _validate_test_result,
     "review": _validate_review_result,
+    "discuss": _validate_discuss_result,
     "resume": _validate_code_result,
 }
 

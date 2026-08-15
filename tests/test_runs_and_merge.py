@@ -7,7 +7,10 @@ the merge is pure data reduction over already-validated result blocks.
 from __future__ import annotations
 
 import json
+import os
 import time
+
+from pathlib import Path
 
 import pytest
 
@@ -256,3 +259,141 @@ def test_the_generated_skill_says_when_not_to_dispatch(isolated, tmp_path,
     assert "needs this conversation" in text
     # The budget is quoted from the CLI's own constant, not retyped.
     assert f"{review_cmd.DEFAULT_TIMEOUT_S}s" in text
+
+
+# ----------------------------------------------------------------------
+# discuss: independent positions, and whether they split
+# ----------------------------------------------------------------------
+
+
+def _position(provider, choice, position="a stance", changer="new benchmark"):
+    return {"provider": provider, "result": {
+        "choice": choice, "position": position,
+        "reasoning": [{"point": "p", "evidence": "a.py:1"}],
+        "risks": "r", "would_change_if": changer}}
+
+
+def test_a_split_is_reported_as_a_split():
+    from pilot_workers.cli import discuss_cmd
+
+    summary = discuss_cmd.summarize(
+        [_position("ds", "async"), _position("glm", "sync")], ["ds", "glm"])
+    assert summary["split"] is True
+    assert summary["distinct_choices"] == ["async", "sync"]
+    assert summary["answered"] == 2
+
+
+def test_agreement_is_not_reported_as_a_split():
+    from pilot_workers.cli import discuss_cmd
+
+    summary = discuss_cmd.summarize(
+        [_position("ds", "async"), _position("glm", "async")], ["ds", "glm"])
+    assert summary["split"] is False
+
+
+def test_an_open_ended_question_needs_no_choice():
+    """A question that names no options must not force a false dichotomy."""
+    from pilot_workers.cli import discuss_cmd
+
+    summary = discuss_cmd.summarize(
+        [_position("ds", None), _position("glm", None)], ["ds", "glm"])
+    assert summary["answered"] == 2
+    assert summary["distinct_choices"] == []
+    assert summary["split"] is False
+
+
+def test_a_failed_job_does_not_sink_the_others():
+    from pilot_workers.cli import discuss_cmd
+
+    summary = discuss_cmd.summarize(
+        [{"provider": "ds", "result": None, "verdict": "error"},
+         _position("glm", "sync")], ["ds", "glm"])
+    assert summary["answered"] == 1
+    assert summary["positions"][0]["position"] is None
+
+
+def test_the_discuss_validator_demands_a_committed_position():
+    from pilot_workers.cli.dispatch import _validate_discuss_result
+
+    good = {"position": "do it async", "choice": "async",
+            "reasoning": [{"point": "p", "evidence": "a.py:1"}],
+            "risks": "r", "would_change_if": "a benchmark showing X"}
+    assert _validate_discuss_result(good)
+
+    # choice may be null (open-ended question) ...
+    assert _validate_discuss_result({**good, "choice": None})
+    # ... but an empty position, no reasoning, or no would_change_if is not
+    # a usable input to a decision.
+    assert not _validate_discuss_result({**good, "position": "   "})
+    assert not _validate_discuss_result({**good, "reasoning": []})
+    assert not _validate_discuss_result({**good, "would_change_if": ""})
+
+
+def test_discuss_runs_read_only_like_explore():
+    """A discussion reads to argue; it must never edit."""
+    from pilot_workers import policy
+
+    perms = policy.agent_permissions("discuss")
+    assert perms["edit"] == "deny"
+    assert perms["bash"]["*>*"] == "deny"
+
+
+# ----------------------------------------------------------------------
+# test mode: a noise filter, not a thinker
+# ----------------------------------------------------------------------
+
+
+def test_the_default_is_one_suite_run(isolated):
+    """`pw9 test` runs the suite. Two default layers meant two workers
+    rediscovering the same command and racing on the same workdir."""
+    from pilot_workers import strategies
+
+    layers = strategies.effective("test")
+    assert len(layers) == 1
+    assert layers[0]["name"] == "suite"
+
+
+def test_known_failures_reach_the_generated_task(isolated):
+    """Without a baseline every pre-existing failure comes back as a new
+    finding — the opposite of the context protection this mode is for."""
+    from pilot_workers import strategies
+    from pilot_workers.cli import test_cmd
+
+    layer = strategies.effective("test")[0]
+    path = test_cmd._generate_task(layer, "/tmp", "tests/x.py::y — broken since May")
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    finally:
+        os.unlink(path)
+    assert "Known Pre-existing Failures" in text
+    assert "broken since May" in text
+    assert "NOT a new finding" in text
+
+
+def test_the_task_says_run_and_report_not_diagnose(isolated):
+    from pilot_workers import strategies
+    from pilot_workers.cli import test_cmd
+
+    layer = strategies.effective("test")[0]
+    path = test_cmd._generate_task(layer, "/tmp")
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    finally:
+        os.unlink(path)
+    assert "none" in text            # empty baseline renders as "none"
+    assert "Do not diagnose" in text
+
+
+def test_the_test_result_schema_caps_what_comes_back(isolated):
+    """The value is that the suite's output dies in the worker: counts plus
+    capped per-failure text, never the whole log."""
+    import pilot_workers
+    from pilot_workers import policy
+
+    prompt = (Path(pilot_workers.__file__).resolve().parent
+              / "prompts" / "test.md").read_text(encoding="utf-8")
+    assert "capped at 40 lines" in prompt
+    assert '"passed"' in prompt and '"failed"' in prompt
+    # And the mode may run tests but never edit source.
+    perms = policy.agent_permissions("test")
+    assert perms["edit"] == "deny"

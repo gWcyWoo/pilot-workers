@@ -24,6 +24,7 @@ subcommands:
   permissions  Per-provider permission overrides: add/remove/show rules.
   provider     Manage provider configurations (add/edit/remove/show).
   explore      Auto-fanout exploration by lenses (flow/constraints/impact/abstraction).
+  discuss      Same question to several models independently; shows where they split.
   review       Auto-fanout code review by configured axes (add/edit/remove/show).
   test         Auto-fanout test execution by configured layers (add/edit/remove/show).
   maintain     Worker log, sandbox and worktree lifecycle tools.
@@ -76,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     if subcommand == "template":
         import pilot_workers
 
-        modes = ("code", "explore", "test", "review")
+        modes = ("code", "explore", "test", "review", "discuss")
         if rest and rest[0] in ("-h", "--help"):
             print(f"usage: pilot-workers template {{{'|'.join(modes)}}}")
             return 0
@@ -136,6 +137,11 @@ def main(argv: list[str] | None = None) -> int:
         from pilot_workers.cli.provider_cmd import main as provider_main
 
         return provider_main(rest)
+
+    if subcommand == "discuss":
+        from pilot_workers.cli.discuss_cmd import main as discuss_main
+
+        return discuss_main(rest)
 
     if subcommand == "explore":
         from pilot_workers.cli.explore_cmd import main as explore_main

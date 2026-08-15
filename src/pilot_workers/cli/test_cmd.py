@@ -19,13 +19,21 @@ from pilot_workers import strategies
 from pilot_workers.providers import PROVIDERS
 
 USAGE = """usage:
-  pw9 test --provider <key>[,<key>,...] --workdir <dir> [--timeout <sec>]
+  pw9 test --provider <key> --workdir <dir>
+           [--known-failures <path>] [--timeout <sec>] [--dry-run]
   pw9 test add <name>             # opens $EDITOR to write the focus
   pw9 test edit [<name>]          # edit one layer or the whole config
   pw9 test remove <name>
   pw9 test show
 
-Multiple providers are round-robin assigned across layers.
+Runs the suite in a worker so its output dies there instead of in the
+planner's context; only the failures come back.
+
+--known-failures  a file listing failures already known to be broken, so
+                  they are not reported as new. Several providers are
+                  round-robin assigned across layers, but note that a suite
+                  gives the same pass/fail on any model — extra providers
+                  buy nothing here.
 """
 
 _MODE = "test"
@@ -191,13 +199,15 @@ def _cmd_show() -> int:
 # auto-fanout execution
 # ------------------------------------------------------------------
 
-def _generate_task(layer: dict[str, str], workdir: str) -> str:
+def _generate_task(layer: dict[str, str], workdir: str,
+                   known_failures: str = "") -> str:
     name = layer["name"]
     focus = layer.get("focus", "")
     fd, path_str = tempfile.mkstemp(
         suffix=".md", prefix=f"pw9-test-{name.replace('/', '_')}-")
     os.close(fd)
     os.chmod(path_str, 0o600)
+    baseline = known_failures.strip() or "none"
     content = f"""<!-- pw9 auto-generated test task — layer: {name} -->
 
 # Test Target
@@ -208,17 +218,26 @@ Project at {workdir}.
 
 {focus}
 
+# Known Pre-existing Failures — do not report these as new
+
+{baseline}
+
 # Directions
 
-- Identify and run the test commands for this layer.
-- Report the command, exit code, pass/fail counts, and any failure details.
-- If tests fail, report each failure with the test name and error message.
+- Find the project's test command and run it in full.
+- Report the command, exit code, and pass/fail counts.
+- For each failure: the full test name and the raw error text.
+- A failure listed above as pre-existing is NOT a new finding — say it is
+  still failing, but do not present it as something this run discovered.
+- Do not diagnose and do not fix. Your job is to run the suite and hand
+  back the failures; the planner takes it from there.
 """
     Path(path_str).write_text(content, encoding="utf-8")
     return path_str
 
 
-def _cmd_run(provider_list: list[str], workdir: str, timeout: int) -> int:
+def _cmd_run(provider_list: list[str], workdir: str, timeout: int,
+             known_failures: str = "") -> int:
     for p in provider_list:
         if p not in PROVIDERS:
             print(f"error: unknown provider: {p}", file=sys.stderr)
@@ -243,7 +262,8 @@ def _cmd_run(provider_list: list[str], workdir: str, timeout: int) -> int:
 
     task_files: list[str] = []
     for layer in layers:
-        task_files.append(_generate_task(layer, str(workdir_path)))
+        task_files.append(_generate_task(layer, str(workdir_path),
+                                         known_failures))
 
     fanout_argv = ["--workdir", str(workdir_path)]
     for i, tf in enumerate(task_files):
@@ -305,6 +325,7 @@ def _dispatch(verb: str, args: list[str]) -> int:
 
     provider = None
     workdir = None
+    known_failures_file = None
     timeout = 900
     dry_run = False
     i = 0
@@ -322,6 +343,9 @@ def _dispatch(verb: str, args: list[str]) -> int:
                 print(f"error: --timeout requires an integer, got {args[i + 1]!r}",
                       file=sys.stderr)
                 return 2
+            i += 2
+        elif args[i] == "--known-failures" and i + 1 < len(args):
+            known_failures_file = args[i + 1]
             i += 2
         elif args[i] == "--dry-run":
             dry_run = True
@@ -355,4 +379,13 @@ def _dispatch(verb: str, args: list[str]) -> int:
         }, indent=2))
         return 0
 
-    return _cmd_run(provider_list, workdir, timeout)
+    known_failures = ""
+    if known_failures_file:
+        path = Path(known_failures_file)
+        if not path.is_file():
+            print(f"error: known-failures file not found: {known_failures_file}",
+                  file=sys.stderr)
+            return 2
+        known_failures = path.read_text(encoding="utf-8").strip()
+
+    return _cmd_run(provider_list, workdir, timeout, known_failures)
