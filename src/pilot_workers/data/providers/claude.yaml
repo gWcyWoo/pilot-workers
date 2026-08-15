@@ -1,0 +1,17 @@
+# Claude via Anthropic's official API. Requires an Anthropic API key.
+# A Claude Pro/Max SUBSCRIPTION cannot be used here: Anthropic prohibits
+# driving it from third-party clients, and OpenCode removed that path in
+# 1.3.0. API key only.
+# Docs: https://docs.anthropic.com/
+
+key: claude
+provider_id: anthropic
+model_id: claude-opus-4-8
+base_url: https://api.anthropic.com/v1
+display_name: Claude Opus 4.8 Worker
+context_tokens: 1000000
+output_tokens: 128000
+npm: "@ai-sdk/anthropic"
+strengths: long-context reasoning, contract-grade precision; coding, review, exploration
+suitable_modes: code, review, explore
+notes: requires an Anthropic API key (console.anthropic.com), not a Claude Pro/Max subscription

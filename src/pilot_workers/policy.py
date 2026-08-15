@@ -503,7 +503,7 @@ def build_config(provider: Provider, mode: str, *, permission_profile: str | Non
     model = provider.model
     permissions = effective_permissions(
         provider, mode, permission_profile=permission_profile)
-    return {
+    config = {
         "$schema": "https://opencode.ai/config.json",
         "autoupdate": False,
         "share": "disabled",
@@ -511,22 +511,6 @@ def build_config(provider: Provider, mode: str, *, permission_profile: str | Non
         "small_model": model,
         "default_agent": agent_name,
         "enabled_providers": [provider.provider_id],
-        "provider": {
-            provider.provider_id: {
-                "npm": "@ai-sdk/openai-compatible",
-                "name": provider.display_name,
-                "options": {"baseURL": provider.base_url},
-                "models": {
-                    provider.model_id: {
-                        "name": provider.display_name,
-                        "limit": {
-                            "context": provider.context_tokens,
-                            "output": provider.output_tokens,
-                        },
-                    }
-                },
-            }
-        },
         "permission": {"*": "deny"},
         "agent": {
             agent_name: {
@@ -539,3 +523,26 @@ def build_config(provider: Provider, mode: str, *, permission_profile: str | Non
             }
         },
     }
+    if provider.auth == "api":
+        # A key-authenticated provider is declared in full: the engine has no
+        # built-in entry for it, so this block IS the endpoint and model card.
+        config["provider"] = {
+            provider.provider_id: {
+                "npm": provider.npm,
+                "name": provider.display_name,
+                "options": {"baseURL": provider.base_url},
+                "models": {
+                    provider.model_id: {
+                        "name": provider.display_name,
+                        "limit": {
+                            "context": provider.context_tokens,
+                            "output": provider.output_tokens,
+                        },
+                    }
+                },
+            }
+        }
+    # An oauth provider declares nothing: the engine owns the integration
+    # (endpoint, model catalogue and token refresh), and a custom block here
+    # would shadow it with a half-configured duplicate.
+    return config

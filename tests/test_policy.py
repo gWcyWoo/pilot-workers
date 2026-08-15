@@ -675,3 +675,47 @@ def test_the_bundled_profiles_still_load():
     """The shape check must not reject what ships."""
     for name in ("relaxed", "strict"):
         assert load_permission_profile(name)
+
+
+# ----------------------------------------------------------------------
+# auth modes: api (existing providers) vs oauth (subscription providers)
+# ----------------------------------------------------------------------
+
+
+def test_api_providers_still_declare_the_full_provider_block():
+    """The npm/auth fields were added with defaults that reproduce the
+    original hardcoded values, so a key-authenticated provider must build
+    exactly the block it built before those fields existed."""
+    config = build_config(PROVIDERS["glm"], "code")
+    block = config["provider"]["glm-worker"]
+    assert block["npm"] == "@ai-sdk/openai-compatible"
+    assert block["options"] == {"baseURL": PROVIDERS["glm"].base_url}
+    assert block["models"]["glm-5.2"]["limit"] == {
+        "context": PROVIDERS["glm"].context_tokens,
+        "output": PROVIDERS["glm"].output_tokens,
+    }
+
+
+def test_an_oauth_provider_declares_no_provider_block():
+    """The engine owns the integration for an oauth provider — endpoint,
+    model catalogue and token refresh. A custom block here would shadow it
+    with a half-configured duplicate."""
+    config = build_config(PROVIDERS["codex"], "code")
+    assert "provider" not in config
+    assert config["enabled_providers"] == ["openai"]
+    assert config["model"] == "openai/gpt-5.3-codex"
+
+
+def test_a_provider_can_name_a_different_npm_package():
+    """Claude over its own API is not openai-compatible."""
+    config = build_config(PROVIDERS["claude"], "code")
+    assert config["provider"]["anthropic"]["npm"] == "@ai-sdk/anthropic"
+
+
+def test_oauth_and_api_providers_get_the_same_permissions():
+    """Auth mode changes wiring, never the sandbox."""
+    for key in ("glm", "codex"):
+        config = build_config(PROVIDERS[key], "explore")
+        agent = config["agent"][policy.MODE_TO_AGENT["explore"]]
+        assert agent["permission"]["edit"] == "deny"
+        assert agent["permission"]["bash"]["*>*"] == "deny"

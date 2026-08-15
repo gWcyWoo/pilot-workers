@@ -36,4 +36,13 @@ def _isolate_home(tmp_path_factory, monkeypatch):
     # providers.pilot_home() reaches for Path.home(), which reads the password
     # database rather than $HOME on some platforms.
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    return home
+    # PROVIDERS merges user-level overrides at IMPORT time, i.e. before this
+    # fixture redirects the home — so without this the suite would read the
+    # developer's real ~/.codex/providers/ and pass or fail on their personal
+    # config. Re-resolve against the redirected home, and again on teardown so
+    # a test that writes an override cannot leak it into the next one.
+    from pilot_workers import providers
+
+    providers.reload_providers()
+    yield home
+    providers.reload_providers()

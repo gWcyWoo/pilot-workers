@@ -1,0 +1,17 @@
+# Codex (GPT) via a ChatGPT Plus/Pro subscription.
+# Auth is OAuth: `pw9 key codex` hands the device-code flow to OpenCode,
+# which writes and refreshes the token in this provider's own profile.
+# No base_url — OpenCode's built-in `openai` integration carries the endpoint.
+# Docs: https://opencode.ai/docs/providers/
+
+key: codex
+provider_id: openai
+model_id: gpt-5.3-codex
+display_name: Codex (ChatGPT subscription)
+context_tokens: 400000
+output_tokens: 128000
+auth: oauth
+auth_method: chatgpt-headless
+strengths: strong multi-step coding and review; billed against a ChatGPT subscription rather than API credits
+suitable_modes: code, review, explore
+notes: requires a ChatGPT Plus/Pro subscription; run 'pw9 key codex' and follow the device-code prompt

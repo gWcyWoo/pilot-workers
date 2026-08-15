@@ -87,6 +87,70 @@ def _uninstall_runner(name: str) -> int:
 # ------------------------------------------------------------------
 
 
+def _oauth_login(provider) -> int:
+    """Hand an oauth provider's login to the engine that owns the flow.
+
+    pw9 implements no OAuth: it only points the engine's XDG dirs at this
+    provider's isolated profile and lets the engine run its own device-code
+    exchange. The engine then writes the token payload to exactly the path
+    pw9 already treats as this provider's credential file, and refreshes it
+    there for the life of the grant.
+    """
+    import os
+
+    from pilot_workers import runtime
+    from pilot_workers.runners import get_runner
+
+    runner = get_runner(provider.runner)
+    binary = runner.binary_path()
+    if binary is None or not binary.is_file():
+        print(f"error: runner {provider.runner} is not installed; "
+              f"run: pw9 install runner {provider.runner}", file=sys.stderr)
+        return 1
+
+    paths = providers.profile_paths(provider)
+    for name in ("root", "config", "data", "state", "cache"):
+        runtime.ensure_private_directory(paths[name])
+
+    # The parent environment is inherited on purpose: this is an INTERACTIVE
+    # command the user is running at their own terminal, and the login flow
+    # needs TERM/tty to print its device code. Only the XDG dirs are
+    # overridden, so the token lands in this provider's profile and nowhere
+    # else. (Dispatch keeps its SAFE_ENV_KEYS rebuild — see build_environment.)
+    env = dict(os.environ)
+    env.update({
+        "XDG_CONFIG_HOME": str(paths["config"]),
+        "XDG_DATA_HOME": str(paths["data"]),
+        "XDG_STATE_HOME": str(paths["state"]),
+        "XDG_CACHE_HOME": str(paths["cache"]),
+    })
+
+    command = [str(binary), "auth", "login",
+               "-p", provider.provider_id,
+               "-m", provider.auth_method]
+    print(f"  delegating login to {provider.runner}: "
+          f"{provider.provider_id} / {provider.auth_method}")
+    rc = subprocess.run(command, env=env).returncode
+    if rc != 0:
+        print(f"error: login failed (exit {rc})", file=sys.stderr)
+        return rc
+
+    path = runner.credential_path(provider)
+    if not path.is_file():
+        print(f"error: login reported success but wrote no credential at {path}",
+              file=sys.stderr)
+        return 1
+    # The engine writes with its own umask; pw9's dispatch path refuses a
+    # credential file readable by anyone else, so tighten it here rather than
+    # let the next dispatch fail on a file this command produced.
+    try:
+        os.chmod(path, 0o600)
+    except OSError as exc:
+        print(f"warning: could not tighten {path}: {exc}", file=sys.stderr)
+    print(f"  configured: {provider.key}")
+    return 0
+
+
 def _key_configure(provider_key: str) -> int:
     from pilot_workers import credentials
 
@@ -95,6 +159,13 @@ def _key_configure(provider_key: str) -> int:
               f"(available: {', '.join(sorted(providers.PROVIDERS))})",
               file=sys.stderr)
         return 2
+    provider = providers.PROVIDERS[provider_key]
+    if provider.auth == "oauth":
+        try:
+            return _oauth_login(provider)
+        except (RuntimeError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     try:
         credentials.configure(provider_key)
     except (RuntimeError, OSError) as exc:

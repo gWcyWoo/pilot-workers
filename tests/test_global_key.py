@@ -257,3 +257,72 @@ def test_a_credential_removed_mid_read_gives_a_clean_error(isolated, monkeypatch
         runtime.credential_key(provider, runner)
     meta = runtime.credential_metadata(provider, runner)
     assert meta["configured"] is False
+
+
+# ----------------------------------------------------------------------
+# oauth credentials: the engine writes them, pw9 only reads the token
+# ----------------------------------------------------------------------
+
+
+def test_an_oauth_credential_is_parsed_for_redaction(isolated):
+    """An oauth provider's auth.json is written by the ENGINE, in its own
+    shape. pw9 reads one thing out of it: the live bearer token, so the
+    dispatch can keep it out of the transcript."""
+    provider = providers.PROVIDERS["codex"]
+    runner = get_runner(provider.runner)
+    path = runner.credential_path(provider)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"openai": {
+        "type": "oauth",
+        "access": "sk-oauth-access-token-value",
+        "refresh": "refresh-token-value",
+        "expires": 9999999999,
+    }}), encoding="utf-8")
+    path.chmod(0o600)
+
+    assert runtime.credential_key(provider, runner) == "sk-oauth-access-token-value"
+
+
+def test_an_oauth_access_token_is_redacted_from_output(isolated):
+    from pilot_workers.cli.run import _configured_secrets
+
+    provider = providers.PROVIDERS["codex"]
+    path = get_runner(provider.runner).credential_path(provider)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"openai": {
+        "type": "oauth", "access": "sk-oauth-leaked-1234567890",
+        "refresh": "r", "expires": 1,
+    }}), encoding="utf-8")
+    path.chmod(0o600)
+
+    secrets = _configured_secrets()
+    assert "sk-oauth-leaked-1234567890" in secrets
+    assert runtime.redact_secrets(
+        "token sk-oauth-leaked-1234567890 here", secrets) == "token [REDACTED] here"
+
+
+def test_an_unknown_credential_type_is_still_refused(isolated):
+    """Reverse assertion: widening to oauth must not accept anything."""
+    provider = providers.PROVIDERS["codex"]
+    runner = get_runner(provider.runner)
+    path = runner.credential_path(provider)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"openai": {"type": "bearer", "token": "x" * 20}}),
+                    encoding="utf-8")
+    path.chmod(0o600)
+
+    with pytest.raises(RuntimeError, match="lacks API or oauth auth"):
+        runtime.credential_key(provider, runner)
+
+
+def test_pw9_key_on_an_oauth_provider_does_not_prompt(isolated, monkeypatch, capsys):
+    """`pw9 key codex` must hand the flow to the engine, not read a pasted
+    string: an OAuth grant cannot be typed in."""
+    calls = []
+    monkeypatch.setattr("getpass.getpass", lambda *a, **k: calls.append(1) or "x")
+    # No runner installed in the isolated home, so this exits early — the point
+    # is that it took the delegation path instead of prompting.
+    rc = install_mod.key_main(["codex"])
+    assert not calls, "an oauth provider must never reach the getpass prompt"
+    assert rc != 0
+    assert "install runner" in capsys.readouterr().err

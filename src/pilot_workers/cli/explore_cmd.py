@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -66,9 +67,6 @@ def _open_editor(initial: str, suffix: str = ".md") -> str | None:
             os.unlink(path)
         except OSError:
             pass
-
-
-import subprocess
 
 
 def _cmd_add(name: str) -> int:

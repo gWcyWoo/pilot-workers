@@ -376,19 +376,38 @@ class OpenCodeRunner(Runner):
         return {provider.provider_id: {"type": "api", "key": key}}
 
     def parse_credential(self, provider: Provider, payload: dict) -> str:
+        """The secret this run must keep out of its own output.
 
+        Two shapes, because the engine writes two. A key-authenticated
+        provider stores ``{"type": "api", "key": ...}`` — pw9 wrote it. An
+        oauth provider stores ``{"type": "oauth", "access": ..., "refresh":
+        ..., "expires": ...}`` — the ENGINE wrote it during its own login
+        flow, and refreshes it in place. Either way the caller wants one
+        string: the live bearer token, so it can be redacted from the
+        transcript.
+        """
         # See runtime.credential_key for the neutral-layer wrapper.
         entry = payload.get(provider.provider_id)
-        if not isinstance(entry, dict) or entry.get("type") != "api":
+        if not isinstance(entry, dict):
             raise RuntimeError(
-                f"credential file lacks API auth for {provider.provider_id}"
+                f"credential file lacks an entry for {provider.provider_id}"
             )
-        key = entry.get("key")
-        if not isinstance(key, str) or not key.strip():
+        kind = entry.get("type")
+        if kind == "api":
+            field = "key"
+        elif kind == "oauth":
+            field = "access"
+        else:
+            raise RuntimeError(
+                f"credential file lacks API or oauth auth for "
+                f"{provider.provider_id}"
+            )
+        secret = entry.get(field)
+        if not isinstance(secret, str) or not secret.strip():
             raise RuntimeError(
                 f"credential is empty for {provider.provider_id}"
             )
-        return key
+        return secret
 
 
 # ----------------------------------------------------------------------

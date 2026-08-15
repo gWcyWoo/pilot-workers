@@ -81,7 +81,11 @@ def dry_run_summary(provider: providers.Provider, mode: str, workdir: Path, *, p
         "provider": provider.key,
         "runner": provider.runner,
         "provider_id": provider.provider_id,
-        "endpoint": provider.base_url,
+        # An oauth provider has no base_url of its own — the engine's built-in
+        # integration carries the endpoint. Reporting "" there reads as a
+        # missing value rather than an inapplicable one.
+        "endpoint": provider.base_url or f"(built into runner {provider.runner})",
+        "auth": provider.auth,
         "model": provider.model,
         "agent": policy.MODE_TO_AGENT[mode],
         "mode": mode,
