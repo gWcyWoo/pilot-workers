@@ -19,16 +19,25 @@ from pilot_workers import strategies
 from pilot_workers.providers import PROVIDERS
 
 USAGE = """usage:
-  pw9 review --provider <key>[,<key>,...] --workdir <dir> [--timeout <sec>]
+  pw9 review --provider <key>[,<key>,...] --workdir <dir>
+             [--replicate] [--raw] [--timeout <sec>] [--dry-run]
   pw9 review add <name>            # opens $EDITOR to write the focus
   pw9 review edit [<name>]         # edit one axis or the whole config
   pw9 review remove <name>
   pw9 review show
 
-Multiple providers are round-robin assigned across axes for cross-model review.
+Several providers are round-robin assigned across axes (shares the load).
+--replicate gives every axis to every provider instead: the same scope seen
+by independent models, which is what makes cross-model review worth its
+cost. Findings are merged by location and marked with how many models
+flagged each; --raw prints the unmerged verdict array.
 """
 
 _MODE = "review"
+
+# One source for the per-job budget: the generated skill quotes this number,
+# so a literal here and prose there would drift apart on the first change.
+DEFAULT_TIMEOUT_S = 900
 
 
 # ------------------------------------------------------------------
@@ -234,7 +243,108 @@ none
     return path_str
 
 
-def _cmd_run(provider_list: list[str], workdir: str, timeout: int) -> int:
+_SEVERITY_ORDER = {"high": 3, "medium": 2, "low": 1}
+
+
+def _last_json_array(text: str) -> list[dict]:
+    """fanout's stdout is started lines then ONE verdict array, last."""
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if line.startswith("["):
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                return []
+            return [d for d in data if isinstance(d, dict)]
+    return []
+
+
+def build_plan(axes: list[dict], provider_list: list[str],
+               replicate: bool) -> list[tuple[dict, str]]:
+    """Which provider reviews which axis.
+
+    Default is round-robin: the axes are SPREAD across providers, which
+    shares the load but leaves every axis seen by exactly one model.
+    ``replicate`` instead gives every axis to every provider — the shape
+    cross-model review actually needs, since its whole premise is that two
+    models' blind spots are uncorrelated, and that only pays off when both
+    look at the SAME scope.
+    """
+    if replicate:
+        return [(axis, p) for axis in axes for p in provider_list]
+    return [(axis, provider_list[i % len(provider_list)])
+            for i, axis in enumerate(axes)]
+
+
+def merge_findings(verdicts: list[dict],
+                   plan: list[tuple[dict, str]]) -> list[dict]:
+    """Group findings across axes by location, keeping provenance.
+
+    Deterministic — no model involved. Findings at the same `file_line` are
+    grouped, never dropped: two axes describing different defects on one
+    line are both real, so each keeps its own summary. What the grouping
+    adds is `found_by`, which is the whole point under ``--replicate``: a
+    location several independent models flagged is worth more of the
+    planner's attention than one a single model raised.
+    """
+    grouped: dict[str, dict] = {}
+    for index, verdict in enumerate(verdicts):
+        if index < len(plan):
+            axis_name = plan[index][0].get("name", "?")
+            provider = plan[index][1]
+        else:
+            axis_name, provider = "?", str(verdict.get("provider") or "?")
+        result = verdict.get("result")
+        if not isinstance(result, dict):
+            continue
+        for finding in result.get("findings") or []:
+            if not isinstance(finding, dict):
+                continue
+            location = str(finding.get("file_line") or "(no location)")
+            entry = grouped.setdefault(location, {
+                "file_line": location,
+                "severity": "low",
+                "found_by": [],
+                "findings": [],
+            })
+            severity = str(finding.get("severity") or "low")
+            if _SEVERITY_ORDER.get(severity, 0) > _SEVERITY_ORDER.get(
+                    entry["severity"], 0):
+                entry["severity"] = severity
+            source = f"{axis_name}/{provider}"
+            if source not in entry["found_by"]:
+                entry["found_by"].append(source)
+            entry["findings"].append(finding)
+    merged = list(grouped.values())
+    merged.sort(key=lambda e: (-_SEVERITY_ORDER.get(e["severity"], 0),
+                               -len(e["found_by"]), e["file_line"]))
+    return merged
+
+
+def _print_merged(merged: list[dict], verdicts: list[dict]) -> None:
+    counts = {"high": 0, "medium": 0, "low": 0}
+    for entry in merged:
+        counts[entry["severity"]] = counts.get(entry["severity"], 0) + 1
+    print(f"\n{len(merged)} locations — "
+          f"{counts['high']} high, {counts['medium']} medium, {counts['low']} low",
+          file=sys.stderr)
+    for entry in merged:
+        confirms = len(entry["found_by"])
+        mark = f" [{confirms}x]" if confirms > 1 else ""
+        print(f"\n{entry['severity'].upper():6} {entry['file_line']}{mark}"
+              f"  ({', '.join(entry['found_by'])})", file=sys.stderr)
+        for finding in entry["findings"]:
+            print(f"       {finding.get('summary', '')}", file=sys.stderr)
+    reports = [v.get("final_text_path") for v in verdicts
+               if v.get("final_text_path")]
+    if reports:
+        print("\nfull reports:", file=sys.stderr)
+        for path in reports:
+            print(f"  {path}", file=sys.stderr)
+
+
+def _cmd_run(provider_list: list[str], workdir: str, timeout: int,
+             replicate: bool = False, raw: bool = False) -> int:
     for p in provider_list:
         if p not in PROVIDERS:
             print(f"error: unknown provider: {p}", file=sys.stderr)
@@ -250,28 +360,44 @@ def _cmd_run(provider_list: list[str], workdir: str, timeout: int) -> int:
               file=sys.stderr)
         return 1
 
+    plan = build_plan(axes, provider_list, replicate)
     label = ",".join(provider_list)
-    print(f"review: {len(axes)} axes × {len(provider_list)} provider(s) ({label})",
-          file=sys.stderr)
-    for i, ax in enumerate(axes):
-        p = provider_list[i % len(provider_list)]
-        print(f"  → {ax['name']} ({p})", file=sys.stderr)
+    print(f"review: {len(plan)} jobs "
+          f"({len(axes)} axes × {len(provider_list)} provider(s): {label})"
+          + (" [replicated]" if replicate else ""), file=sys.stderr)
+    for axis, p in plan:
+        print(f"  → {axis['name']} ({p})", file=sys.stderr)
 
     task_files: list[str] = []
-    for axis in axes:
-        task_files.append(_generate_task(axis, str(workdir_path)))
-
     fanout_argv = ["--workdir", str(workdir_path)]
-    for i, tf in enumerate(task_files):
-        p = provider_list[i % len(provider_list)]
-        fanout_argv.extend(["--job", f"{p}:review:{tf}"])
+    for axis, p in plan:
+        path = _generate_task(axis, str(workdir_path))
+        task_files.append(path)
+        fanout_argv.extend(["--job", f"{p}:review:{path}"])
     fanout_argv.extend(["--timeout", str(timeout)])
 
     from pilot_workers.cli.fanout import main as fanout_main
 
-    rc = fanout_main(fanout_argv)
+    if raw:
+        rc = fanout_main(fanout_argv)
+    else:
+        # fanout owns the stdout contract (started lines + one verdict
+        # array). Capture it so the findings can be merged before anything
+        # reaches the planner — protecting the context this tool exists to
+        # protect — then re-emit the array so `--json`-style consumers and
+        # pipelines still see exactly what fanout produced.
+        import contextlib
+        import io
 
-    # Clean up task files.
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            rc = fanout_main(fanout_argv)
+        captured = buffer.getvalue()
+        print(captured, end="")
+        verdicts = _last_json_array(captured)
+        if verdicts:
+            _print_merged(merge_findings(verdicts, plan), verdicts)
+
     for tf in task_files:
         try:
             os.unlink(tf)
@@ -323,8 +449,10 @@ def _dispatch(verb: str, args: list[str]) -> int:
     # Execution mode: pw9 review --provider <key> --workdir <dir>
     provider = None
     workdir = None
-    timeout = 900
+    timeout = DEFAULT_TIMEOUT_S
     dry_run = False
+    replicate = False
+    raw = False
     i = 0
     while i < len(args):
         if args[i] == "--provider" and i + 1 < len(args):
@@ -344,6 +472,12 @@ def _dispatch(verb: str, args: list[str]) -> int:
         elif args[i] == "--dry-run":
             dry_run = True
             i += 1
+        elif args[i] == "--replicate":
+            replicate = True
+            i += 1
+        elif args[i] == "--raw":
+            raw = True
+            i += 1
         else:
             print(f"error: unexpected argument: {args[i]}", file=sys.stderr)
             print(USAGE, end="", file=sys.stderr)
@@ -361,16 +495,16 @@ def _dispatch(verb: str, args: list[str]) -> int:
 
     if dry_run:
         axes = strategies.effective(_MODE)
-        plan = []
-        for i, a in enumerate(axes):
-            plan.append({"axis": a["name"],
-                         "provider": provider_list[i % len(provider_list)]})
+        plan = build_plan(axes, provider_list, replicate)
         print(json.dumps({
             "mode": "review",
             "providers": provider_list,
-            "plan": plan,
+            "replicate": replicate,
+            "jobs": len(plan),
+            "plan": [{"axis": a["name"], "provider": p} for a, p in plan],
             "workdir": workdir,
         }, indent=2))
         return 0
 
-    return _cmd_run(provider_list, workdir, timeout)
+    return _cmd_run(provider_list, workdir, timeout,
+                    replicate=replicate, raw=raw)

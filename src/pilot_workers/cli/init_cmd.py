@@ -114,9 +114,38 @@ def _render_skill() -> str:
             lines.append(f"  Auto-splits into {_lens_count()} lenses (flow/constraints/impact/abstraction) and runs in parallel. Also supports `--requirement-file <path>`.")
             lines.append("")
 
+    lines.append("## When NOT to dispatch")
+    lines.append("")
+    lines.append("Delegating is not free: a worker cannot see this conversation, so")
+    lines.append("everything it needs must be written down, and its output must be read")
+    lines.append("back and judged. Keep the work here when:")
+    lines.append("")
+    lines.append("- **The spec would be longer than the diff.** If describing the change")
+    lines.append("  precisely enough for a worker takes more effort than making it, make it.")
+    lines.append("- **The check is faster than the round trip.** A suite that finishes in")
+    lines.append("  under a minute, a one-line grep, a file you already have open — do it")
+    lines.append("  directly. A dispatch costs a process start, a model call, and a verdict")
+    lines.append("  to parse.")
+    lines.append("- **The answer needs this conversation.** Anything depending on what the")
+    lines.append("  user just said, on a decision made three turns ago, or on unwritten")
+    lines.append("  context cannot be delegated — the worker starts blank.")
+    lines.append("- **Judgment is the deliverable.** Which approach to take, what the")
+    lines.append("  requirement really means, whether a trade-off is acceptable: decide")
+    lines.append("  those here, then delegate the execution.")
+    lines.append("")
+    lines.append("The inverse is where dispatch pays: reading a lot to answer a little")
+    lines.append("(`explore`), the same scope examined from several angles at once")
+    lines.append("(`review`), and bulk execution against a spec you have already settled")
+    lines.append("(`code`). Reading is where the tokens go — that is the work worth moving.")
+    lines.append("")
     lines.append("## Notes")
     lines.append("")
     lines.append("- `review`, `test`, and `explore` run in the foreground and print a JSON verdict array to stdout.")
+    lines.append(f"- Default per-job budget is {_default_timeout()}s. Host shells often cut off sooner —")
+    lines.append("  run these in a background shell rather than letting a tool timeout kill the fanout.")
+    lines.append("- After a `review`, findings are merged by location; `[Nx]` means N independent")
+    lines.append("  models flagged the same place. `--replicate` gives every axis to every")
+    lines.append("  provider, which is what makes that number meaningful.")
     lines.append("- `dispatch` prints two JSON lines (started + verdict) — run in a background Bash.")
     lines.append("- `--provider` accepts comma-separated keys for cross-model dispatch: `--provider ds,glm,kimi-k3` round-robins across providers.")
     lines.append("- All commands run against the current workdir. Workers cannot see this conversation.")
@@ -134,6 +163,13 @@ def _axis_count() -> int:
 def _lens_count() -> int:
     from pilot_workers import strategies
     return len(strategies.effective("explore"))
+
+
+def _default_timeout() -> int:
+    """Read from the CLI's own default so the skill text cannot drift."""
+    from pilot_workers.cli import review_cmd
+
+    return review_cmd.DEFAULT_TIMEOUT_S
 
 
 def _write_skill(host: str, content: str) -> None:

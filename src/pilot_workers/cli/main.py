@@ -19,6 +19,8 @@ subcommands:
   uninstall    Remove a runner or API key.
   key          Configure a provider's API key (pw9 key <provider>).
   status       Provider API keys, runner state [--json].
+  runs         Dispatch history, newest first [--provider|--mode|--since|--last].
+  usage        Token totals per provider [--since <N>d].
   permissions  Per-provider permission overrides: add/remove/show rules.
   provider     Manage provider configurations (add/edit/remove/show).
   explore      Auto-fanout exploration by lenses (flow/constraints/impact/abstraction).
@@ -124,6 +126,11 @@ def main(argv: list[str] | None = None) -> int:
         from pilot_workers.cli.permissions import main as permissions_main
 
         return permissions_main(rest)
+
+    if subcommand in ("runs", "usage"):
+        from pilot_workers.cli.runs_cmd import main as runs_main
+
+        return runs_main(rest, command=subcommand)
 
     if subcommand == "provider":
         from pilot_workers.cli.provider_cmd import main as provider_main
