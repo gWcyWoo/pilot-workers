@@ -25,6 +25,7 @@ subcommands:
   provider     Manage provider configurations (add/edit/remove/show).
   explore      Auto-fanout exploration by lenses (flow/constraints/impact/abstraction).
   discuss      Same question to several models independently; shows where they split.
+  spec         Explore, then draft a code task contract for you to edit.
   review       Auto-fanout code review by configured axes (add/edit/remove/show).
   test         Auto-fanout test execution by configured layers (add/edit/remove/show).
   maintain     Worker log, sandbox and worktree lifecycle tools.
@@ -137,6 +138,11 @@ def main(argv: list[str] | None = None) -> int:
         from pilot_workers.cli.provider_cmd import main as provider_main
 
         return provider_main(rest)
+
+    if subcommand == "spec":
+        from pilot_workers.cli.spec_cmd import main as spec_main
+
+        return spec_main(rest)
 
     if subcommand == "discuss":
         from pilot_workers.cli.discuss_cmd import main as discuss_main

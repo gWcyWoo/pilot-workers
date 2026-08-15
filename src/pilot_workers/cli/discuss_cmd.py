@@ -25,7 +25,7 @@ from pilot_workers.providers import PROVIDERS
 USAGE = """usage:
   pw9 discuss --provider <key>[,<key>,...] --workdir <dir>
               --question "<text>" | --question-file <path>
-              [--context <path>] [--rebut <path>] [--raw]
+              [--context <path>] [--rebut <path>] [--raw] [--out <path>]
               [--timeout <sec>] [--dry-run]
 
 Each provider answers the same question independently and does not see the
@@ -33,6 +33,9 @@ others. Output is the positions and where they split — not a merged verdict.
 
 --context  extra material every model should read (design notes, a spec)
 --rebut    a previous round's positions; each model must engage with them
+--out      write the verdict array to a file. These commands run in the
+           foreground for minutes; a host shell that cuts off at its own
+           timeout kills the fanout. Background the call and read the file.
 """
 
 _MODE = "discuss"
@@ -174,7 +177,8 @@ def _read(path_str: str, label: str) -> str | None:
 
 
 def _cmd_run(provider_list: list[str], workdir: str, question: str,
-             context: str, rebut: str, timeout: int, raw: bool) -> int:
+             context: str, rebut: str, timeout: int, raw: bool,
+             out_path: str | None = None) -> int:
     workdir_path = Path(workdir).resolve()
     if not workdir_path.is_dir():
         print(f"error: workdir not found: {workdir}", file=sys.stderr)
@@ -210,6 +214,10 @@ def _cmd_run(provider_list: list[str], workdir: str, question: str,
         verdicts = _last_json_array(captured)
         if verdicts:
             _print_summary(summarize(verdicts, provider_list))
+        if out_path:
+            Path(out_path).write_text(
+                json.dumps(verdicts, indent=2), encoding="utf-8")
+            print(f"\n  verdicts written: {out_path}", file=sys.stderr)
 
     for path in task_files:
         try:
@@ -226,14 +234,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     provider = workdir = question = None
-    question_file = context_file = rebut_file = None
+    question_file = context_file = rebut_file = out_path = None
     timeout = DEFAULT_TIMEOUT_S
     dry_run = raw = False
     i = 0
     while i < len(args):
         arg = args[i]
         if arg in ("--provider", "--workdir", "--question", "--question-file",
-                   "--context", "--rebut", "--timeout") and i + 1 < len(args):
+                   "--context", "--rebut", "--out",
+                   "--timeout") and i + 1 < len(args):
             value = args[i + 1]
             if arg == "--provider":
                 provider = value
@@ -247,6 +256,8 @@ def main(argv: list[str] | None = None) -> int:
                 context_file = value
             elif arg == "--rebut":
                 rebut_file = value
+            elif arg == "--out":
+                out_path = value
             else:
                 try:
                     timeout = int(value)
@@ -314,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         return _cmd_run(provider_list, workdir, question, context, rebut,
-                        timeout, raw)
+                        timeout, raw, out_path)
     except (RuntimeError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

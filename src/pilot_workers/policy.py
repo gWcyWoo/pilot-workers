@@ -525,9 +525,12 @@ def build_config(provider: Provider, mode: str, *, permission_profile: str | Non
             }
         },
     }
-    if provider.auth == "api":
-        # A key-authenticated provider is declared in full: the engine has no
-        # built-in entry for it, so this block IS the endpoint and model card.
+    if provider.auth == "api" and provider.declare:
+        # A key-authenticated provider the engine does NOT know is declared in
+        # full: this block IS the endpoint and model card. When the engine
+        # already has the provider (declare: false), the block is omitted so
+        # the engine's own registry entry — endpoint, npm and full model
+        # catalogue — is what gets used.
         config["provider"] = {
             provider.provider_id: {
                 "npm": provider.npm,

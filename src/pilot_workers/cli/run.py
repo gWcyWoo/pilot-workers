@@ -248,6 +248,15 @@ def main(argv: list[str] | None = None) -> int:
                 "exit_code": result.exit_code,
             }
             print(json.dumps(summary))
+            # `run` is the inner primitive: it streams events and writes the
+            # log, but the structured result and report.md are `dispatch`'s
+            # job. A user who followed a quick start to `run` would otherwise
+            # be left holding a summary with no findings in it — so say where
+            # the answer actually is.
+            print(f"note: for the extracted result and a report.md, run "
+                  f"through 'pw9 dispatch' instead, or reparse this log:\n"
+                  f"      pw9 dispatch --reparse {log_path} --mode {args.mode}",
+                  file=sys.stderr)
             if renderer is not None:
                 try:
                     renderer.write_event(summary)

@@ -20,7 +20,8 @@ from pilot_workers.providers import PROVIDERS
 
 USAGE = """usage:
   pw9 test --provider <key> --workdir <dir>
-           [--known-failures <path>] [--timeout <sec>] [--dry-run]
+           [--known-failures <path>] [--out <path>]
+           [--timeout <sec>] [--dry-run]
   pw9 test add <name>             # opens $EDITOR to write the focus
   pw9 test edit [<name>]          # edit one layer or the whole config
   pw9 test remove <name>
@@ -34,6 +35,10 @@ planner's context; only the failures come back.
                   round-robin assigned across layers, but note that a suite
                   gives the same pass/fail on any model — extra providers
                   buy nothing here.
+
+--out      write the verdict array to a file. These commands run in the
+           foreground for minutes; a host shell that cuts off at its own
+           timeout kills the fanout. Background the call and read the file.
 """
 
 _MODE = "test"
@@ -237,7 +242,7 @@ Project at {workdir}.
 
 
 def _cmd_run(provider_list: list[str], workdir: str, timeout: int,
-             known_failures: str = "") -> int:
+             known_failures: str = "", out_path: str | None = None) -> int:
     for p in provider_list:
         if p not in PROVIDERS:
             print(f"error: unknown provider: {p}", file=sys.stderr)
@@ -273,7 +278,22 @@ def _cmd_run(provider_list: list[str], workdir: str, timeout: int,
 
     from pilot_workers.cli.fanout import main as fanout_main
 
-    rc = fanout_main(fanout_argv)
+    if out_path:
+        import contextlib
+        import io
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            rc = fanout_main(fanout_argv)
+        captured = buffer.getvalue()
+        print(captured, end="")
+        for line in reversed(captured.splitlines()):
+            if line.strip().startswith("["):
+                Path(out_path).write_text(line.strip(), encoding="utf-8")
+                print(f"  verdicts written: {out_path}", file=sys.stderr)
+                break
+    else:
+        rc = fanout_main(fanout_argv)
 
     for tf in task_files:
         try:
@@ -326,6 +346,7 @@ def _dispatch(verb: str, args: list[str]) -> int:
     provider = None
     workdir = None
     known_failures_file = None
+    out_path = None
     timeout = 900
     dry_run = False
     i = 0
@@ -343,6 +364,9 @@ def _dispatch(verb: str, args: list[str]) -> int:
                 print(f"error: --timeout requires an integer, got {args[i + 1]!r}",
                       file=sys.stderr)
                 return 2
+            i += 2
+        elif args[i] == "--out" and i + 1 < len(args):
+            out_path = args[i + 1]
             i += 2
         elif args[i] == "--known-failures" and i + 1 < len(args):
             known_failures_file = args[i + 1]
@@ -388,4 +412,4 @@ def _dispatch(verb: str, args: list[str]) -> int:
             return 2
         known_failures = path.read_text(encoding="utf-8").strip()
 
-    return _cmd_run(provider_list, workdir, timeout, known_failures)
+    return _cmd_run(provider_list, workdir, timeout, known_failures, out_path)

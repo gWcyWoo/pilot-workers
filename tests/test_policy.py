@@ -708,10 +708,24 @@ def test_an_oauth_provider_declares_no_provider_block():
     assert config["model"] == "openai/gpt-5.3-codex"
 
 
-def test_a_provider_can_name_a_different_npm_package():
-    """Claude over its own API is not openai-compatible."""
-    config = build_config(PROVIDERS["claude"], "code")
-    assert config["provider"]["anthropic"]["npm"] == "@ai-sdk/anthropic"
+def test_a_provider_the_engine_already_knows_declares_nothing():
+    """`declare: false` means the engine's own registry entry — endpoint, npm
+    package and full model catalogue — is authoritative. A thin block here
+    would shadow it, which is what the three-way experiment showed: a block is
+    required only when the provider id is NOT in that registry."""
+    for key in ("claude", "gpt"):
+        config = build_config(PROVIDERS[key], "code")
+        assert "provider" not in config, key
+        assert config["enabled_providers"] == [PROVIDERS[key].provider_id]
+
+
+def test_a_custom_endpoint_still_declares_its_block():
+    """Reverse assertion: glm/ds/kimi use made-up provider ids pointing at
+    vendor coding endpoints, which the registry does not know."""
+    config = build_config(PROVIDERS["glm"], "code")
+    block = config["provider"]["glm-worker"]
+    assert block["npm"] == "@ai-sdk/openai-compatible"
+    assert block["options"]["baseURL"] == PROVIDERS["glm"].base_url
 
 
 def test_oauth_and_api_providers_get_the_same_permissions():

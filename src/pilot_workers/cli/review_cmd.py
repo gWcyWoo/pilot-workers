@@ -20,7 +20,8 @@ from pilot_workers.providers import PROVIDERS
 
 USAGE = """usage:
   pw9 review --provider <key>[,<key>,...] --workdir <dir>
-             [--replicate] [--raw] [--timeout <sec>] [--dry-run]
+             [--base <ref>] [--replicate] [--raw] [--force] [--out <path>]
+             [--timeout <sec>] [--dry-run]
   pw9 review add <name>            # opens $EDITOR to write the focus
   pw9 review edit [<name>]         # edit one axis or the whole config
   pw9 review remove <name>
@@ -31,6 +32,15 @@ Several providers are round-robin assigned across axes (shares the load).
 by independent models, which is what makes cross-model review worth its
 cost. Findings are merged by location and marked with how many models
 flagged each; --raw prints the unmerged verdict array.
+
+Default scope is the working tree. --base <ref> reviews a branch against
+it (`git diff <ref>...HEAD`) — the usual pre-PR moment. An empty scope is
+refused rather than dispatched, because a review of nothing comes back
+with no findings and reads as a clean one; --force overrides.
+
+--out      write the verdict array to a file. These commands run in the
+           foreground for minutes; a host shell that cuts off at its own
+           timeout kills the fanout. Background the call and read the file.
 """
 
 _MODE = "review"
@@ -205,7 +215,56 @@ def _cmd_show() -> int:
 # auto-fanout execution
 # ------------------------------------------------------------------
 
-def _generate_task(axis: dict[str, str], workdir: str) -> str:
+def scope_commands(base: str | None) -> tuple[str, str]:
+    """(description, the git command that materialises the scope).
+
+    Without a base the scope is the working tree — what you are about to
+    commit. With one it is a branch against its fork point, which is the
+    normal pre-PR moment and the case the hardcoded working-diff scope
+    silently reviewed as empty.
+    """
+    if base:
+        return (f"the changes on this branch since `{base}`",
+                f"git diff {base}...HEAD")
+    return ("the current working diff (staged + unstaged + untracked)",
+            "git diff HEAD")
+
+
+def review_scope_is_empty(workdir: str, base: str | None) -> bool:
+    """True when there is nothing to review.
+
+    Dispatching against an empty scope burns a worker per axis and comes
+    back with no findings — indistinguishable from a clean review. That is
+    the worst possible failure for a review tool: it reports success.
+    """
+    import subprocess
+
+    def _run(args: list[str]) -> str:
+        try:
+            proc = subprocess.run(args, cwd=workdir, capture_output=True,
+                                  text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            # Not a git repo, or git is unavailable: cannot prove the scope
+            # is empty, so do not block the dispatch.
+            return "unknown"
+        return proc.stdout if proc.returncode == 0 else "unknown"
+
+    _, diff_cmd = scope_commands(base)
+    diff = _run(diff_cmd.split())
+    if diff == "unknown":
+        return False
+    if diff.strip():
+        return False
+    if base:
+        return True
+    # Untracked files are part of the working scope but invisible to
+    # `git diff`, so an empty diff alone does not mean nothing to review.
+    untracked = _run(["git", "status", "--porcelain"])
+    return untracked != "unknown" and not untracked.strip()
+
+
+def _generate_task(axis: dict[str, str], workdir: str,
+                   base: str | None = None) -> str:
     """Generate a review task file for one axis."""
     name = axis["name"]
     focus = axis.get("focus", "")
@@ -214,13 +273,15 @@ def _generate_task(axis: dict[str, str], workdir: str) -> str:
     os.close(fd)
     os.chmod(path_str, 0o600)
     path = Path(path_str)
+    description, diff_cmd = scope_commands(base)
+    untracked_note = ("" if base else
+                      "Also check `git status --porcelain` for untracked files.\n")
     content = f"""<!-- pw9 auto-generated review task — axis: {name} -->
 
 # Review Target
 
-The current working diff in {workdir}.
-Run `git diff HEAD` to see staged+unstaged changes; check `git status --porcelain`
-for untracked files. Review ALL changed and new files.
+In {workdir}: {description}.
+Run `{diff_cmd}` to see it. {untracked_note}Review ALL changed and new files.
 
 # Focus: {name}
 
@@ -344,7 +405,9 @@ def _print_merged(merged: list[dict], verdicts: list[dict]) -> None:
 
 
 def _cmd_run(provider_list: list[str], workdir: str, timeout: int,
-             replicate: bool = False, raw: bool = False) -> int:
+             replicate: bool = False, raw: bool = False,
+             base: str | None = None, force: bool = False,
+             out_path: str | None = None) -> int:
     for p in provider_list:
         if p not in PROVIDERS:
             print(f"error: unknown provider: {p}", file=sys.stderr)
@@ -352,6 +415,16 @@ def _cmd_run(provider_list: list[str], workdir: str, timeout: int,
     workdir_path = Path(workdir).resolve()
     if not workdir_path.is_dir():
         print(f"error: workdir not found: {workdir}", file=sys.stderr)
+        return 2
+
+    if not force and review_scope_is_empty(str(workdir_path), base):
+        scope, cmd = scope_commands(base)
+        print(f"error: nothing to review — {scope} is empty ({cmd} returned "
+              f"no changes).\n"
+              f"       Reviewing an empty scope returns no findings, which "
+              f"reads as a clean review.\n"
+              f"       Use --base <ref> to review committed work, or --force "
+              f"to dispatch anyway.", file=sys.stderr)
         return 2
 
     axes = strategies.effective(_MODE)
@@ -371,7 +444,7 @@ def _cmd_run(provider_list: list[str], workdir: str, timeout: int,
     task_files: list[str] = []
     fanout_argv = ["--workdir", str(workdir_path)]
     for axis, p in plan:
-        path = _generate_task(axis, str(workdir_path))
+        path = _generate_task(axis, str(workdir_path), base)
         task_files.append(path)
         fanout_argv.extend(["--job", f"{p}:review:{path}"])
     fanout_argv.extend(["--timeout", str(timeout)])
@@ -397,6 +470,10 @@ def _cmd_run(provider_list: list[str], workdir: str, timeout: int,
         verdicts = _last_json_array(captured)
         if verdicts:
             _print_merged(merge_findings(verdicts, plan), verdicts)
+        if out_path:
+            Path(out_path).write_text(
+                json.dumps(verdicts, indent=2), encoding="utf-8")
+            print(f"\n  verdicts written: {out_path}", file=sys.stderr)
 
     for tf in task_files:
         try:
@@ -453,6 +530,9 @@ def _dispatch(verb: str, args: list[str]) -> int:
     dry_run = False
     replicate = False
     raw = False
+    base = None
+    force = False
+    out_path = None
     i = 0
     while i < len(args):
         if args[i] == "--provider" and i + 1 < len(args):
@@ -471,6 +551,15 @@ def _dispatch(verb: str, args: list[str]) -> int:
             i += 2
         elif args[i] == "--dry-run":
             dry_run = True
+            i += 1
+        elif args[i] == "--out" and i + 1 < len(args):
+            out_path = args[i + 1]
+            i += 2
+        elif args[i] == "--base" and i + 1 < len(args):
+            base = args[i + 1]
+            i += 2
+        elif args[i] == "--force":
+            force = True
             i += 1
         elif args[i] == "--replicate":
             replicate = True
@@ -500,6 +589,7 @@ def _dispatch(verb: str, args: list[str]) -> int:
             "mode": "review",
             "providers": provider_list,
             "replicate": replicate,
+            "scope": scope_commands(base)[1],
             "jobs": len(plan),
             "plan": [{"axis": a["name"], "provider": p} for a, p in plan],
             "workdir": workdir,
@@ -507,4 +597,5 @@ def _dispatch(verb: str, args: list[str]) -> int:
         return 0
 
     return _cmd_run(provider_list, workdir, timeout,
-                    replicate=replicate, raw=raw)
+                    replicate=replicate, raw=raw, base=base, force=force,
+                    out_path=out_path)

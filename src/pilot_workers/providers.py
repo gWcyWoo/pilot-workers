@@ -52,6 +52,13 @@ class Provider:
     # provider YAML that names none of them builds exactly the config it did
     # before these fields existed.
     npm: str = "@ai-sdk/openai-compatible"
+    # Whether the engine needs this provider spelled out. A provider the
+    # engine already knows (its id is in the engine's own registry, e.g.
+    # `openai`, `anthropic`) carries its own endpoint, npm package and model
+    # catalogue there; declaring a second, thinner copy here would shadow it.
+    # Custom endpoints (a vendor's coding-plan URL under a made-up id) are
+    # NOT in that registry and must be declared — hence the default.
+    declare: bool = True
     # "api" (key in auth.json) or "oauth" (the engine owns the login flow and
     # writes its own token payload). An oauth provider needs no base_url: the
     # engine's built-in integration carries the endpoint.
@@ -130,6 +137,15 @@ def _parse_yaml(path: Path) -> dict[str, Any]:
     return result
 
 
+def _require_bool(value: Any, default: bool) -> bool:
+    """YAML `false`/`true`, or the strings a flat-parser fallback produces."""
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ("false", "no", "0")
+
+
 def _require_int(value: Any, field: str, path: Path) -> int:
     try:
         return int(value)
@@ -154,9 +170,12 @@ def provider_from_data(data: dict[str, Any], path: Path) -> Provider:
             f"{', '.join(AUTH_MODES)}, got {auth!r}")
     # An oauth provider takes its endpoint from the engine's built-in
     # integration, so base_url is meaningless there and must not be demanded.
+    # `declare: false` says the same thing for a key-authenticated provider
+    # the engine already knows.
     required = ["key", "provider_id", "model_id", "display_name",
                 "context_tokens", "output_tokens"]
-    if auth == "api":
+    declare = _require_bool(data.get("declare"), True)
+    if auth == "api" and declare:
         required.insert(3, "base_url")
     missing = [f for f in required if f not in data]
     if missing:
@@ -185,6 +204,7 @@ def provider_from_data(data: dict[str, Any], path: Path) -> Provider:
         runner=data.get("runner") or "opencode",
         asset_prefix=data.get("asset_prefix") or data["key"],
         npm=str(data.get("npm") or "@ai-sdk/openai-compatible"),
+        declare=_require_bool(data.get("declare"), True),
         auth=auth,
         auth_method=str(data.get("auth_method") or ""),
         strengths=str(data.get("strengths") or ""),

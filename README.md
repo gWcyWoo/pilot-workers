@@ -32,8 +32,9 @@ pw9 key glm
 # 3. Check status
 pw9 status
 
-# 4. Run a task
-pw9 run --provider glm --mode code --workdir /path/to/project --task-file /tmp/task.md
+# 4. Run a task (dispatch = run + a structured verdict and a report.md)
+pw9 template code > /tmp/task.md   # fill it in first
+pw9 dispatch --provider glm --mode code --workdir /path/to/project --task-file /tmp/task.md
 
 # 5. Auto-fanout code review (5 axes in parallel)
 pw9 review --provider glm --workdir .
@@ -52,8 +53,11 @@ Drop a YAML file in `data/providers/` with the required fields (`key`, `provider
 |---------|-------------|
 | `pw9 key <provider>` | Configure API key |
 | `pw9 status [--json]` | Provider credentials + runner state |
-| `pw9 run --provider <key> --mode <mode> --workdir <dir> --task-file <file>` | Dispatch a single task |
-| `pw9 dispatch ...` | Like `run`, but stdout = two JSON lines (started + verdict) |
+| `pw9 dispatch --provider <key> --mode <mode> --workdir <dir> --task-file <file>` | Dispatch a single task; stdout = two JSON lines (started + verdict), plus a report.md on disk |
+| `pw9 run ...` | The inner primitive `dispatch` wraps — streams events, writes the log, but extracts no result |
+| `pw9 spec --provider <key> --workdir <dir> --requirement "..."` | Explore, then draft a code task contract to edit |
+| `pw9 discuss --provider <a>,<b> --workdir <dir> --question "..."` | One question, independent positions, shows where they split |
+| `pw9 runs` / `pw9 usage` | Dispatch history and token totals |
 | `pw9 fanout --workdir <dir> --job <provider:mode:file> ...` | Dispatch several jobs concurrently |
 | `pw9 review --provider <key> --workdir <dir>` | Auto-fanout code review by axes |
 | `pw9 test --provider <key> --workdir <dir>` | Auto-fanout test execution by layers |

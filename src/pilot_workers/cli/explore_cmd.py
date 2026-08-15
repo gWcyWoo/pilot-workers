@@ -20,6 +20,7 @@ from pilot_workers.providers import PROVIDERS
 USAGE = """usage:
   pw9 explore --provider <key>[,<key>,...] --workdir <dir> --requirement "<text>"
   pw9 explore --provider <key>[,<key>,...] --workdir <dir> --requirement-file <path>
+              [--out <path>] [--timeout <sec>] [--dry-run]
   pw9 explore add <name>            # opens $EDITOR to write the focus
   pw9 explore edit [<name>]         # edit one lens or the whole config
   pw9 explore remove <name>
@@ -27,6 +28,10 @@ USAGE = """usage:
 
 Multiple providers are round-robin assigned across lenses.
 All 4 lenses are dispatched by default; manage with add/edit/remove.
+
+--out      write the verdict array to a file. These commands run in the
+           foreground for minutes; a host shell that cuts off at its own
+           timeout kills the fanout. Background the call and read the file.
 """
 
 _MODE = "explore"
@@ -221,8 +226,73 @@ def _generate_task(lens: dict[str, str], workdir: str,
     return path_str
 
 
+def _last_json_array(text: str) -> list[dict]:
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if line.startswith("["):
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                return []
+            return [d for d in data if isinstance(d, dict)]
+    return []
+
+
+def run_lenses(provider_list: list[str], workdir_path: Path, requirement: str,
+               timeout: int, *, capture: bool = False,
+               ) -> tuple[int, list[dict], list[dict]]:
+    """Fan the configured lenses out. Returns (rc, verdicts, lens_plan).
+
+    ``capture`` swallows fanout's stdout and hands the verdicts back instead
+    of printing them — that is how `pw9 spec` consumes the same exploration
+    without the planner having to read it twice.
+    """
+    lenses = strategies.effective(_MODE)
+    if not lenses:
+        print("error: no explore lenses configured; run 'pw9 explore show'",
+              file=sys.stderr)
+        return 1, [], []
+
+    plan = [(lens, provider_list[i % len(provider_list)])
+            for i, lens in enumerate(lenses)]
+    label = ",".join(provider_list)
+    print(f"explore: {len(lenses)} lenses × {len(provider_list)} provider(s) "
+          f"({label})", file=sys.stderr)
+    for lens, provider in plan:
+        print(f"  → {lens['name']} ({provider})", file=sys.stderr)
+
+    task_files: list[str] = []
+    fanout_argv = ["--workdir", str(workdir_path)]
+    for lens, provider in plan:
+        path = _generate_task(lens, str(workdir_path), requirement)
+        task_files.append(path)
+        fanout_argv.extend(["--job", f"{provider}:explore:{path}"])
+    fanout_argv.extend(["--timeout", str(timeout)])
+
+    from pilot_workers.cli.fanout import main as fanout_main
+
+    verdicts: list[dict] = []
+    if capture:
+        import contextlib
+        import io
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            rc = fanout_main(fanout_argv)
+        verdicts = _last_json_array(buffer.getvalue())
+    else:
+        rc = fanout_main(fanout_argv)
+
+    for path in task_files:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    return rc, verdicts, [lens for lens, _ in plan]
+
+
 def _cmd_run(provider_list: list[str], workdir: str, requirement: str,
-             timeout: int) -> int:
+             timeout: int, out_path: str | None = None) -> int:
     for p in provider_list:
         if p not in PROVIDERS:
             print(f"error: unknown provider: {p}", file=sys.stderr)
@@ -232,39 +302,15 @@ def _cmd_run(provider_list: list[str], workdir: str, requirement: str,
         print(f"error: workdir not found: {workdir}", file=sys.stderr)
         return 2
 
-    lenses = strategies.effective(_MODE)
-    if not lenses:
-        print("error: no explore lenses configured; run 'pw9 explore show'",
-              file=sys.stderr)
-        return 1
-
-    label = ",".join(provider_list)
-    print(f"explore: {len(lenses)} lenses × {len(provider_list)} provider(s) ({label})",
-          file=sys.stderr)
-    for i, lens in enumerate(lenses):
-        p = provider_list[i % len(provider_list)]
-        print(f"  → {lens['name']} ({p})", file=sys.stderr)
-
-    task_files: list[str] = []
-    for lens in lenses:
-        task_files.append(_generate_task(lens, str(workdir_path), requirement))
-
-    fanout_argv = ["--workdir", str(workdir_path)]
-    for i, tf in enumerate(task_files):
-        p = provider_list[i % len(provider_list)]
-        fanout_argv.extend(["--job", f"{p}:explore:{tf}"])
-    fanout_argv.extend(["--timeout", str(timeout)])
-
-    from pilot_workers.cli.fanout import main as fanout_main
-
-    rc = fanout_main(fanout_argv)
-
-    for tf in task_files:
-        try:
-            os.unlink(tf)
-        except OSError:
-            pass
-
+    if out_path:
+        rc, verdicts, _ = run_lenses(provider_list, workdir_path, requirement,
+                                     timeout, capture=True)
+        Path(out_path).write_text(json.dumps(verdicts, indent=2),
+                                  encoding="utf-8")
+        print(json.dumps(verdicts))
+        print(f"  verdicts written: {out_path}", file=sys.stderr)
+    else:
+        rc, _, _ = run_lenses(provider_list, workdir_path, requirement, timeout)
     return rc
 
 
@@ -312,6 +358,7 @@ def _dispatch(verb: str, args: list[str]) -> int:
     workdir = None
     requirement = None
     requirement_file = None
+    out_path = None
     timeout = 900
     dry_run = False
     i = 0
@@ -324,6 +371,9 @@ def _dispatch(verb: str, args: list[str]) -> int:
             i += 2
         elif args[i] == "--requirement" and i + 1 < len(args):
             requirement = args[i + 1]
+            i += 2
+        elif args[i] == "--out" and i + 1 < len(args):
+            out_path = args[i + 1]
             i += 2
         elif args[i] == "--requirement-file" and i + 1 < len(args):
             requirement_file = args[i + 1]
@@ -383,4 +433,4 @@ def _dispatch(verb: str, args: list[str]) -> int:
         }, indent=2))
         return 0
 
-    return _cmd_run(provider_list, workdir, requirement, timeout)
+    return _cmd_run(provider_list, workdir, requirement, timeout, out_path)
