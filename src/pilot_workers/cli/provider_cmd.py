@@ -157,7 +157,10 @@ def _cmd_show() -> int:
         tag = "  [user]" if user_path.is_file() else ""
         print(f"  {key}{tag}")
         print(f"    model: {p.model_id}")
-        print(f"    endpoint: {p.base_url}")
+        print(f"    auth: {p.auth}" + (f" ({p.auth_method})" if p.auth_method else ""))
+        # An oauth provider has no base_url — the runner's built-in integration
+        # carries it. Printing an empty value reads as a missing one.
+        print(f"    endpoint: {p.base_url or f'(built into runner {p.runner})'}")
         if p.strengths:
             print(f"    strengths: {p.strengths}")
         if p.suitable_modes:
