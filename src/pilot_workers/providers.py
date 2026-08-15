@@ -64,6 +64,11 @@ class Provider:
     # engine's built-in integration carries the endpoint.
     auth: str = "api"
     auth_method: str = ""
+    # Reasoning budget for models that take one, passed through to the engine
+    # as the agent's `reasoningEffort` option. Empty means "say nothing" and
+    # the engine's own default applies — which is what a non-reasoning model
+    # needs, since sending the option at all is an error there.
+    effort: str = ""
     # v0.5.0 (design D1): optional flat metadata surfaced by `status` and
     # consulted when picking a provider for a mode. All default to "".
     strengths: str = ""
@@ -155,6 +160,20 @@ def _require_int(value: Any, field: str, path: Path) -> int:
 
 AUTH_MODES = ("api", "oauth")
 
+# The union OpenCode 1.18.4 accepts; which subset a given model takes is the
+# model's business, so an unsupported-but-spelled-correctly value is left for
+# the engine to reject loudly rather than guessed at here.
+EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def _require_effort(value: Any, path: Path) -> str:
+    effort = str(value or "").strip().lower()
+    if effort and effort not in EFFORT_LEVELS:
+        raise RuntimeError(
+            f"provider {path.name}: effort must be one of "
+            f"{', '.join(EFFORT_LEVELS)}, got {effort!r}")
+    return effort
+
 
 def provider_from_data(data: dict[str, Any], path: Path) -> Provider:
     """Validate one provider mapping and build a Provider.
@@ -207,6 +226,7 @@ def provider_from_data(data: dict[str, Any], path: Path) -> Provider:
         declare=_require_bool(data.get("declare"), True),
         auth=auth,
         auth_method=str(data.get("auth_method") or ""),
+        effort=_require_effort(data.get("effort"), path),
         strengths=str(data.get("strengths") or ""),
         suitable_modes=str(data.get("suitable_modes") or ""),
         notes=str(data.get("notes") or ""),

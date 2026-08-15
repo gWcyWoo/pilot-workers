@@ -267,6 +267,26 @@ def test_runner_environment_default_paths_backward_compatible(home, provider):
     assert env["OPENCODE_CONFIG_DIR"] == str(expected)
 
 
+def test_an_oauth_provider_keeps_the_engines_default_plugins(home):
+    """A subscription provider's whole integration — endpoint, token refresh
+    and its subscription-only model catalogue — ships as one of the engine's
+    DEFAULT plugins. Disabling those removed the provider itself: every
+    dispatch died instantly with "Model not found: <the model it had just
+    suggested>". External plugins stay out via `--pure` regardless."""
+    runner = get_runner("opencode")
+    codex = providers.PROVIDERS["codex"]
+    env = runner.runner_environment(codex, runner.build_config(codex, "code"))
+    assert "OPENCODE_DISABLE_DEFAULT_PLUGINS" not in env
+
+
+def test_a_key_authenticated_provider_still_disables_them(home, provider):
+    """The exception is scoped to the auth mode that needs it, not widened
+    into a blanket relaxation."""
+    runner = get_runner("opencode")
+    env = runner.runner_environment(provider, runner.build_config(provider, "code"))
+    assert env["OPENCODE_DISABLE_DEFAULT_PLUGINS"] == "1"
+
+
 # ---------------------------------------------------------------------------
 # cli/run.py --run-id plumbing (resume keyed by --session + --run-id)
 # ---------------------------------------------------------------------------

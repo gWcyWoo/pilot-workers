@@ -705,7 +705,7 @@ def test_an_oauth_provider_declares_no_provider_block():
     config = build_config(PROVIDERS["codex"], "code")
     assert "provider" not in config
     assert config["enabled_providers"] == ["openai"]
-    assert config["model"] == "openai/gpt-5.3-codex"
+    assert config["model"] == "openai/gpt-5.6-sol"
 
 
 def test_a_provider_the_engine_already_knows_declares_nothing():
@@ -735,3 +735,26 @@ def test_oauth_and_api_providers_get_the_same_permissions():
         agent = config["agent"][policy.MODE_TO_AGENT["explore"]]
         assert agent["permission"]["edit"] == "deny"
         assert agent["permission"]["bash"]["*>*"] == "deny"
+
+
+# ----------------------------------------------------------------------
+# reasoning effort
+# ----------------------------------------------------------------------
+
+
+def test_effort_reaches_the_agent_as_reasoning_effort():
+    """A worker is dispatched precisely because nobody watches it think, so
+    the codex subscription asks for more reasoning than the engine's default
+    medium. The engine takes it as a free-form agent option."""
+    config = build_config(PROVIDERS["codex"], "explore")
+    agent = config["agent"][MODE_TO_AGENT["explore"]]
+    assert agent["options"] == {"reasoningEffort": "high"}
+
+
+def test_a_provider_without_effort_sends_no_option_at_all():
+    """Sending `reasoningEffort` to a non-reasoning model is an error there,
+    so an unset effort must omit the key rather than pass an empty string."""
+    for key in ("glm", "ds", "kimi-k3"):
+        agent = build_config(PROVIDERS[key], "explore")["agent"][
+            MODE_TO_AGENT["explore"]]
+        assert "options" not in agent, key

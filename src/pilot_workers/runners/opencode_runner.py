@@ -203,7 +203,7 @@ class OpenCodeRunner(Runner):
         # CI) are added by the runtime layer, not here.
         if paths is None:
             paths = profile_paths(provider)
-        return {
+        env = {
             "OPENCODE_CONFIG_DIR": str(paths["config"] / "opencode"),
             "OPENCODE_CONFIG_CONTENT": json.dumps(config, separators=(",", ":")),
             "OPENCODE_DISABLE_AUTOUPDATE": "1",
@@ -215,6 +215,18 @@ class OpenCodeRunner(Runner):
             "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT": "1",
             "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS": "1",
         }
+        if provider.auth == "oauth":
+            # An oauth provider's whole integration — endpoint, token refresh
+            # and its subscription-only model catalogue — ships as one of
+            # OpenCode's DEFAULT plugins. Disabling those removes the provider
+            # itself: `opencode models` lists zero openai models and every
+            # dispatch dies instantly with "Model not found: <the exact model
+            # it just suggested>". Verified against opencode 1.18.4 on
+            # 2026-08-15 by flipping this one key with everything else fixed.
+            # Only the DEFAULT plugins come back; `--pure` still keeps external
+            # ones out, which is what the isolation guarantee was ever about.
+            del env["OPENCODE_DISABLE_DEFAULT_PLUGINS"]
+        return env
 
     def format_task_input(self, task: str, mode: str) -> str:
 

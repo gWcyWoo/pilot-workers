@@ -2,16 +2,38 @@
 # Auth is OAuth: `pw9 key codex` hands the device-code flow to OpenCode,
 # which writes and refreshes the token in this provider's own profile.
 # No base_url — OpenCode's built-in `openai` integration carries the endpoint.
+#
+# `auth_method` is the method LABEL, not the internal method id: `opencode auth
+# login -m` matches on the label it prints in its own picker ("login method
+# label" per its --help). The id `chatgpt-headless` is rejected.
+#
+# The subscription exposes a DIFFERENT model catalogue than the API key does —
+# `opencode models` under this profile lists no `gpt-5.3-codex` at all. Verified
+# on 2026-08-15 against opencode 1.18.4: gpt-5.3-codex-spark, gpt-5.4{,-fast,
+# -mini,-mini-fast}, gpt-5.5{,-fast}, gpt-5.6-{luna,sol,terra}{,-fast}.
+#
+# Pick a tier by editing `model_id` (`pw9 provider edit codex`):
+#   gpt-5.6-sol    flagship  — priced like the base gpt-5.6 (default)
+#   gpt-5.6-terra  mid
+#   gpt-5.6-luna   cheap
+# Each has a `-fast` variant that trades depth for latency. All three carry the
+# same 1.05M context / 128k output, so those fields hold across the switch.
+#
+# `effort` is the reasoning budget, passed to the engine as the agent's
+# `reasoningEffort` option: minimal | low | medium | high | xhigh | max.
+# The engine's own default is medium; a worker is dispatched precisely because
+# nobody is watching it think, so this defaults to high.
 # Docs: https://opencode.ai/docs/providers/
 
 key: codex
 provider_id: openai
-model_id: gpt-5.3-codex
+model_id: gpt-5.6-sol
 display_name: Codex (ChatGPT subscription)
-context_tokens: 400000
+context_tokens: 1050000
 output_tokens: 128000
 auth: oauth
-auth_method: chatgpt-headless
+auth_method: "ChatGPT Pro/Plus (headless)"
+effort: high
 strengths: strong multi-step coding and review; billed against a ChatGPT subscription rather than API credits
 suitable_modes: code, review, explore
 notes: requires a ChatGPT Plus/Pro subscription; run 'pw9 key codex' and follow the device-code prompt

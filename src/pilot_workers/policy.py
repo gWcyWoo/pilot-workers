@@ -525,6 +525,13 @@ def build_config(provider: Provider, mode: str, *, permission_profile: str | Non
             }
         },
     }
+    if provider.effort:
+        # Free-form pass-through object per the engine's config schema; the
+        # engine forwards it to the model as `reasoning_effort`. Omitted
+        # entirely when unset so a non-reasoning model never sees the key.
+        config["agent"][agent_name]["options"] = {
+            "reasoningEffort": provider.effort,
+        }
     if provider.auth == "api" and provider.declare:
         # A key-authenticated provider the engine does NOT know is declared in
         # full: this block IS the endpoint and model card. When the engine

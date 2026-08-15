@@ -332,3 +332,43 @@ def test_a_bom_saved_provider_file_loads_with_either_parser(tmp_path, monkeypatc
     assert "testp" in load_providers(tmp_path)
     monkeypatch.setattr(providers, "yaml", None)
     assert "testp" in load_providers(tmp_path)
+
+
+# ----------------------------------------------------------------------
+# reasoning effort validation
+# ----------------------------------------------------------------------
+
+# An oauth shape: no base_url is required there, which keeps these cases
+# about `effort` and nothing else.
+_MINIMAL_OAUTH = {
+    "key": "sub",
+    "provider_id": "openai",
+    "model_id": "gpt-5.6-sol",
+    "display_name": "Subscription Worker",
+    "context_tokens": 1050000,
+    "output_tokens": 128000,
+    "auth": "oauth",
+    "auth_method": "ChatGPT Pro/Plus (headless)",
+}
+
+
+def test_effort_accepts_every_level_the_engine_knows(tmp_path):
+    for level in providers.EFFORT_LEVELS:
+        data = dict(_MINIMAL_OAUTH, effort=level)
+        assert providers.provider_from_data(
+            data, tmp_path / "p.yaml").effort == level
+
+
+def test_effort_is_normalised_and_optional(tmp_path):
+    assert providers.provider_from_data(
+        dict(_MINIMAL_OAUTH, effort=" HIGH "), tmp_path / "p.yaml").effort == "high"
+    assert providers.provider_from_data(
+        dict(_MINIMAL_OAUTH), tmp_path / "p.yaml").effort == ""
+
+
+def test_a_misspelled_effort_is_refused_not_forwarded(tmp_path):
+    """A typo silently forwarded would be rejected by the model mid-run, one
+    dispatch later — the load is where it is cheap to see."""
+    with pytest.raises(RuntimeError, match="effort must be one of"):
+        providers.provider_from_data(
+            dict(_MINIMAL_OAUTH, effort="highest"), tmp_path / "p.yaml")

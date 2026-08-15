@@ -16,6 +16,23 @@ context_tokens: <int>               # max context window
 output_tokens: <int>                # max output tokens
 ```
 
+Optional fields, each defaulting to the behaviour that existed before it did:
+
+```yaml
+permissions: <profile-name>         # a profile from data/permissions/
+npm: <package>                      # default @ai-sdk/openai-compatible
+declare: false                      # the engine's registry already knows
+                                    #   provider_id (openai, anthropic) and
+                                    #   carries endpoint + model catalogue;
+                                    #   base_url is then unnecessary
+auth: oauth                         # the engine owns the login flow
+auth_method: "<method LABEL>"       # its picker's label, NOT the internal id
+effort: high                        # reasoning budget: minimal | low |
+                                    #   medium | high | xhigh | max.
+                                    #   Omit for a non-reasoning model —
+                                    #   sending the option there is an error.
+```
+
 Then:
 1. Run `pw9 key <key>` to set up the API credential.
 2. Run `pw9 status` to verify the credential is configured.
