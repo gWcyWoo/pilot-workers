@@ -1,0 +1,37 @@
+# GLM driven through the Claude Code HARNESS instead of OpenCode.
+#
+# Same model and the same account as `glm`; what changes is the agent loop,
+# tool set and permission engine around it. Use this when the harness is what
+# you want to compare, not the model.
+#
+# `base_url` is Zhipu's ANTHROPIC-COMPATIBLE endpoint, not the OpenAI-shaped
+# one `glm.yaml` uses — Claude Code speaks the Anthropic Messages API.
+# Verified 2026-08-15 against Claude Code 2.1.233: a tool-using run completed
+# with structured output, and prompt caching worked through the compat layer
+# (cache_read 1216 on a second turn).
+#
+# Two caveats worth knowing before you route real work here:
+#
+# - This endpoint does NOT honour the model id. A request for `glm-5.2` came
+#   back reporting `glm-5.3`. pw9's promise that a task cannot change the
+#   route still holds for the endpoint and the credential; it does NOT hold
+#   for the exact model version, which only the response can tell you.
+# - The credential is the same Coding Plan key as `glm`, and that plan limits
+#   concurrency by tier. Fanning `pw9 review` out five ways against it is the
+#   thing most likely to trip Zhipu's fair-use throttle — not the harness.
+#
+# `pw9 key glm-cc` stores the key; it is passed to the engine in the
+# environment (ANTHROPIC_AUTH_TOKEN), never in argv and never in a file the
+# engine writes.
+
+key: glm-cc
+provider_id: glm-anthropic
+model_id: glm-5.3
+base_url: https://open.bigmodel.cn/api/anthropic
+display_name: GLM 5.3 (Claude Code harness)
+context_tokens: 1000000
+output_tokens: 128000
+runner: claude-code
+strengths: strong coding model inside Claude Code's agent loop, tool set and permission engine
+suitable_modes: code, review, explore, test
+notes: needs the `claude` CLI on PATH; run 'pw9 key glm-cc' with a Zhipu API key

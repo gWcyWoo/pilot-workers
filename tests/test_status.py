@@ -37,7 +37,7 @@ def test_json_shape(isolated, capsys):
     data = json.loads(capsys.readouterr().out)
 
     assert set(data["providers"]) == {"claude", "codex", "gpt", "ds", "glm",
-                                      "kimi-k3"}
+                                      "glm-cc", "kimi-k3"}
     glm = data["providers"]["glm"]
     assert glm["credential"]["configured"] is False
     assert str(isolated.resolve()) in glm["credential"]["path"]

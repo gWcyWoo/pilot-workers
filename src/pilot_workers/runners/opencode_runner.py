@@ -179,8 +179,12 @@ class OpenCodeRunner(Runner):
     def build_command(
         self, binary: Path, provider: Provider, mode: str,
         workdir: Path, run_id: str, session: str | None,
+        config: dict | None = None,
     ) -> list[str]:
-
+        # `config` is unused here: OpenCode takes its whole configuration
+        # through OPENCODE_CONFIG_CONTENT (see runner_environment), so nothing
+        # from it belongs in argv. The parameter exists for engines that are
+        # configured on the command line instead.
         command = [
             str(binary), "--pure", "run",
             "--model", provider.model,

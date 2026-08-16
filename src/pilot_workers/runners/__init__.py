@@ -14,9 +14,13 @@ from pilot_workers.runners.base import (
     ToolCall,
     UnifiedEvent,
 )
+from pilot_workers.runners.claude_code_runner import ClaudeCodeRunner
 from pilot_workers.runners.opencode_runner import OpenCodeRunner
 
-RUNNERS: dict[str, Runner] = {"opencode": OpenCodeRunner()}
+RUNNERS: dict[str, Runner] = {
+    "opencode": OpenCodeRunner(),
+    "claude-code": ClaudeCodeRunner(),
+}
 
 
 def get_runner(name: str) -> Runner:

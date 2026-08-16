@@ -218,7 +218,15 @@ def test_status_collect_spawns_version_check_once(monkeypatch, tmp_path):
     status_mod._collect()
     status_mod._collect()
 
-    version_probes = [c for c in calls if "--version" in [str(a) for a in c]]
+    # Scoped to the OpenCode binary on purpose. `status` probes every
+    # registered runner, and the D6 cache is specifically about the one whose
+    # probe costs a Node startup; `claude` is a native binary that answers in
+    # milliseconds and deliberately has no cache, so counting every runner's
+    # probes would assert something D6 never claimed.
+    version_probes = [
+        c for c in calls
+        if "--version" in [str(a) for a in c] and str(binary) in [str(a) for a in c]
+    ]
     assert len(version_probes) == 1, (
         "two consecutive status runner checks must share the D6 version "
         "cache and spawn the --version subprocess only once"

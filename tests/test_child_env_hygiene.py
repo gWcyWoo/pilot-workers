@@ -79,4 +79,4 @@ def test_fanout_passes_the_filtered_env_to_its_dispatch_child(
 def test_the_orchestrator_whitelist_is_the_worker_whitelist_plus_paths():
     """One list, one place: divergence is how a var quietly comes back."""
     extra = set(runtime.ORCHESTRATOR_ENV_KEYS) - set(runtime.SAFE_ENV_KEYS)
-    assert extra == {"PILOT_WORKERS_HOME", "CODEX_HOME"}
+    assert extra == {"PILOT_WORKERS_HOME"}

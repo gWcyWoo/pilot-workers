@@ -138,6 +138,87 @@ def test_pilot_home_respects_env_var(monkeypatch, tmp_path):
 
 
 # ----------------------------------------------------------------------
+# The data root moved out of the Codex CLI's home. $CODEX_HOME used to select
+# it, which put every credential, log and run sandbox inside a directory
+# belonging to a different tool.
+# ----------------------------------------------------------------------
+
+
+def test_the_default_root_is_this_tools_own_directory(monkeypatch, tmp_path):
+    monkeypatch.delenv("PILOT_WORKERS_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    assert pilot_home() == (tmp_path / ".pilot-workers").resolve()
+
+
+def test_codex_home_no_longer_selects_the_root(monkeypatch, tmp_path):
+    """It named the Codex CLI's home, not ours; honouring it is the bug."""
+    monkeypatch.delenv("PILOT_WORKERS_HOME", raising=False)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "somewhere-else"))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    assert pilot_home() == (tmp_path / ".pilot-workers").resolve()
+
+
+def test_an_install_still_under_the_old_root_is_told_how_to_move(
+    monkeypatch, tmp_path
+):
+    """Answering with a fresh empty root would report every credential as
+    missing and give no reason. Name the relocation instead."""
+    monkeypatch.delenv("PILOT_WORKERS_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    (tmp_path / ".codex" / "opencode-workers").mkdir(parents=True)
+    (tmp_path / ".codex" / "worker-runtime").mkdir()
+
+    message = providers.legacy_home_notice()
+    assert message is not None
+    assert ".pilot-workers" in message
+    assert "mv opencode-workers worker-runtime" in message
+    # The rest of ~/.codex is Codex's; the instruction must not sweep it up.
+    assert "mv .codex" not in message
+    assert "PILOT_WORKERS_HOME" in message
+    # pilot_home itself must stay a pure path helper: it runs at import time,
+    # so raising there would abort `import pilot_workers.cli.status` and bury
+    # this message in a traceback. The built wheel failed exactly that way.
+    assert pilot_home() == (tmp_path / ".pilot-workers").resolve()
+
+
+def test_the_cli_refuses_before_running_a_subcommand(monkeypatch, tmp_path, capsys):
+    from pilot_workers.cli import main as main_mod
+
+    monkeypatch.delenv("PILOT_WORKERS_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    (tmp_path / ".codex" / "opencode-workers").mkdir(parents=True)
+
+    assert main_mod.main(["status"]) == 1
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert "mv opencode-workers" in err
+
+
+def test_a_bare_codex_home_without_our_data_is_not_an_error(monkeypatch, tmp_path):
+    """Plenty of machines have a Codex install and never ran pw9 against it."""
+    monkeypatch.delenv("PILOT_WORKERS_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    (tmp_path / ".codex" / "sessions").mkdir(parents=True)
+    assert providers.legacy_home_notice() is None
+
+
+def test_a_completed_move_stops_the_refusal(monkeypatch, tmp_path):
+    monkeypatch.delenv("PILOT_WORKERS_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    (tmp_path / ".codex" / "opencode-workers").mkdir(parents=True)
+    (tmp_path / ".pilot-workers").mkdir()
+    assert providers.legacy_home_notice() is None
+
+
+def test_an_explicit_home_override_is_never_second_guessed(monkeypatch, tmp_path):
+    """Someone who set the variable has already made the decision."""
+    monkeypatch.setenv("PILOT_WORKERS_HOME", str(tmp_path / "elsewhere"))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    (tmp_path / ".codex" / "opencode-workers").mkdir(parents=True)
+    assert providers.legacy_home_notice() is None
+
+
+# ----------------------------------------------------------------------
 # v0.5.0 (design D1): optional flat metadata fields strengths /
 # suitable_modes / notes, surfaced by `pilot-workers status`.
 # ----------------------------------------------------------------------

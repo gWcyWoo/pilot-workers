@@ -76,6 +76,11 @@ def dry_run_summary(provider: providers.Provider, mode: str, workdir: Path, *, p
     paths = providers.profile_paths(provider)
     effective_profile = permission_profile or provider.permissions
     bp = runner.binary_path()
+    # Rules the runner could not carry across from pw9's permission model.
+    # Only some engines have any (see claude_code_runner.translate_permissions);
+    # the key is omitted entirely when the list is empty, so a provider with a
+    # clean translation shows nothing rather than an empty reassurance.
+    unmappable = config.get("unmappable_permissions") or []
     return {
         "type": "worker_runner.dry_run",
         "provider": provider.key,
@@ -93,6 +98,7 @@ def dry_run_summary(provider: providers.Provider, mode: str, workdir: Path, *, p
         "sharing": config["share"],
         "enabled_providers": config["enabled_providers"],
         "permission_profile": effective_profile,
+        **({"unmappable_permissions": unmappable} if unmappable else {}),
         "profile": str(paths["root"]),
         "credential": runtime.credential_metadata(provider, runner),
         "runtime": str(bp) if bp else None,
@@ -167,6 +173,12 @@ def main(argv: list[str] | None = None) -> int:
                 provider, runner.runner_environment(provider, config, paths=sandbox),
                 paths=sandbox,
             )
+            # Engines that authenticate from the environment rather than from a
+            # credential file get the key here. Doing it in one place, after the
+            # neutral layer has built the environment, keeps the secret out of
+            # runner_environment (which has no business reading credential
+            # files) and out of argv.
+            runner.apply_credential(env, secret)
             # A resumed attempt's files are named "<sandbox>+<attempt>" so the
             # lifecycle tools can map a log back to the sandbox whose lock guards
             # it. Without the prefix `maintain logs` looked for a sandbox named
@@ -177,7 +189,9 @@ def main(argv: list[str] | None = None) -> int:
             stderr_path = logs / f"{log_stem}.stderr.log"
             agent = policy.MODE_TO_AGENT[args.mode]
             prompt = runner.format_task_input(task, args.mode)
-            command = runner.build_command(binary, provider, args.mode, workdir, run_id, args.session)
+            command = runner.build_command(
+                binary, provider, args.mode, workdir, run_id, args.session,
+                config=config)
 
             try:
                 # log_stem, not run_id: the rendered archive is a per-run
@@ -226,6 +240,15 @@ def main(argv: list[str] | None = None) -> int:
                 command, env, prompt, log_path, stderr_path, secret,
                 renderer=renderer, timeout_s=args.timeout, idle_timeout_s=args.idle_timeout,
                 runner=runner,
+                # The mode's step cap, enforced out here. For OpenCode this is
+                # an outer bound the engine's own `steps` option reaches first;
+                # for an engine with no turn limit of its own it is the only
+                # thing standing between a stuck worker and the wall clock.
+                max_steps=policy.STEPS_BY_MODE[args.mode],
+                # OpenCode is told with --dir and keeps pw9's own cwd; Claude
+                # Code takes its workspace from process.cwd() and must be put
+                # there.
+                cwd=runner.working_directory(workdir),
             )
             secret = ""
             summary = {
@@ -245,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
                 "timed_out": result.timed_out,
                 "idle_timed_out": result.idle_timed_out,
                 "interrupted": result.interrupted,
+                "step_capped": result.step_capped,
                 "exit_code": result.exit_code,
             }
             print(json.dumps(summary))

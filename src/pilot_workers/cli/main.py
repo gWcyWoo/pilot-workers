@@ -60,6 +60,18 @@ def main(argv: list[str] | None = None) -> int:
 
     subcommand, rest = args[0], args[1:]
 
+    # Before any subcommand touches the data root: an install whose data is
+    # still under the Codex CLI's home is told how to move it. Checked here, at
+    # the one place every command passes through, rather than raised from
+    # `pilot_home` — that helper runs at import time, so raising there turns
+    # this into a traceback with the instructions buried in it.
+    from pilot_workers.providers import legacy_home_notice
+
+    notice = legacy_home_notice()
+    if notice is not None:
+        print(f"error: {notice}", file=sys.stderr)
+        return 1
+
     if subcommand == "run":
         from pilot_workers.cli.run import main as run_main
 

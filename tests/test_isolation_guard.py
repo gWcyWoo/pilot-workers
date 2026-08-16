@@ -1,6 +1,7 @@
 """Guard: no test may reach the developer's real config directories.
 
-Credential and runner paths derive from ``$CODEX_HOME`` / ``Path.home()``.
+Credential and runner paths derive from ``$PILOT_WORKERS_HOME`` /
+``Path.home()``.
 ``tests/conftest.py`` redirects the home directory for every test; these
 tests fail loudly if that stops working.
 """
@@ -20,8 +21,20 @@ def test_path_home_is_redirected():
     assert "pytest" in str(Path.home())
 
 
-def test_codex_home_is_redirected():
-    assert "pytest" in os.environ["CODEX_HOME"]
+def test_codex_home_is_never_consulted():
+    """$CODEX_HOME pointed pw9's data root at the Codex CLI's own home.
+
+    conftest sets it to a path that exists nowhere, so any code that starts
+    reading it again lands outside the sandbox and trips the guards below.
+    """
+    from pilot_workers import providers
+
+    assert os.environ["CODEX_HOME"] == "/pilot-workers-must-not-read-this"
+    assert "pilot-workers-must-not-read-this" not in str(providers.pilot_home())
+
+
+def test_pilot_workers_home_is_redirected():
+    assert "pytest" in os.environ["PILOT_WORKERS_HOME"]
 
 
 def test_pilot_home_lands_inside_the_sandbox():
@@ -30,7 +43,7 @@ def test_pilot_home_lands_inside_the_sandbox():
 
 
 def test_home_based_paths_land_inside_the_sandbox():
-    assert "pytest" in str(Path.home() / ".codex")
+    assert "pytest" in str(Path.home() / ".pilot-workers")
 
 
 def test_a_dispatch_child_imports_the_same_package_as_the_parent():
@@ -105,7 +118,7 @@ def test_the_version_cache_was_cleared_after_the_previous_test():
         "state leaked from the previous test")
 
 
-def test_pilot_home_derives_from_the_redirected_codex_home():
+def test_pilot_home_derives_from_the_redirected_home():
     """The on-disk half of the same cache lives under pilot_home()."""
     from pilot_workers import providers
 

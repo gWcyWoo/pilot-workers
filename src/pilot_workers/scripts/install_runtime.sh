@@ -9,8 +9,9 @@ if [[ -z "${OPENCODE_VERSION}" ]]; then
   exit 1
 fi
 
-readonly CODEX_ROOT="${PILOT_WORKERS_HOME:-${CODEX_HOME:-${HOME}/.codex}}"
-readonly INSTALL_ROOT="${CODEX_ROOT}/worker-runtime/opencode/${OPENCODE_VERSION}"
+# Must agree with providers.pilot_home(); $CODEX_HOME is no longer consulted.
+readonly PILOT_ROOT="${PILOT_WORKERS_HOME:-${HOME}/.pilot-workers}"
+readonly INSTALL_ROOT="${PILOT_ROOT}/worker-runtime/opencode/${OPENCODE_VERSION}"
 readonly OPENCODE_BIN="${INSTALL_ROOT}/node_modules/.bin/opencode"
 
 if ! command -v npm >/dev/null 2>&1; then
@@ -27,7 +28,7 @@ if [[ -x "${OPENCODE_BIN}" ]]; then
 fi
 
 mkdir -p "${INSTALL_ROOT}"
-chmod 700 "${CODEX_ROOT}/worker-runtime" "${CODEX_ROOT}/worker-runtime/opencode" "${INSTALL_ROOT}"
+chmod 700 "${PILOT_ROOT}/worker-runtime" "${PILOT_ROOT}/worker-runtime/opencode" "${INSTALL_ROOT}"
 
 npm install \
   --prefix "${INSTALL_ROOT}" \

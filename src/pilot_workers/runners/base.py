@@ -9,10 +9,15 @@ Design notes:
 
 - `worker_runner.started/summary/heartbeat/verdict` are pilot-workers-owned
   events; they bypass `parse_events` and go straight to rendering/verdict.
-- `kind="step"` must fire exactly once per engine step; `build_config` must
-  hard-stop the engine at its step cap. STEPS_BY_MODE is currently calibrated
-  to OpenCode's step granularity and MUST be re-calibrated when a new runner
-  is added.
+- `kind="step"` must fire exactly once per engine step. The step cap is
+  enforced in TWO places and a runner must satisfy at least one: `build_config`
+  hard-stops the engine (OpenCode's `steps` option), and `runtime.run_process`
+  terminates the child once `max_steps` step events have gone by. The read-side
+  cap is not decoration — Claude Code's CLI has no engine-side turn limit at
+  all (its agent `maxTurns` applies to subagents only, verified against 2.1.233
+  on 2026-08-15), so for that runner it is the ONLY cap. STEPS_BY_MODE is
+  calibrated to an API round-trip and MUST be re-checked when a new runner is
+  added, because "one step" is the runner's definition to make.
 - Runners that do not support session resume MUST raise RuntimeError on a
   non-None `session` argument to `build_command` rather than silently ignore.
 - The on-disk JSONL always stores the runner's raw events; `parse_events`
@@ -72,10 +77,11 @@ class Runner(ABC):
     - `worker_runner.started/summary/heartbeat/verdict` are pilot-workers-owned
       events; they do not flow through parse_events and reach rendering and
       verdict logic directly.
-    - `kind="step"` must fire exactly once per engine step; build_config must
-      make the engine hard-stop at its steps cap. STEPS_BY_MODE is currently
-      calibrated to OpenCode's step granularity and MUST be re-calibrated
-      when a new runner is wired in.
+    - `kind="step"` must fire exactly once per engine step. Either build_config
+      makes the engine hard-stop at its steps cap, or the run relies on
+      `runtime.run_process`'s read-side cap — which is armed for every runner
+      and is the only cap available to engines that expose no turn limit.
+      STEPS_BY_MODE MUST be re-checked when a new runner is wired in.
     - Runners that do not support session resume MUST raise RuntimeError on a
       non-None `session` argument; they MUST NOT silently ignore it.
     - The on-disk JSONL always stores the runner's raw events; parse_events
@@ -89,7 +95,43 @@ class Runner(ABC):
 
     @abstractmethod
     def build_command(self, binary: Path, provider: Any, mode: str,
-                      workdir: Path, run_id: str, session: str | None) -> list[str]: ...
+                      workdir: Path, run_id: str, session: str | None,
+                      config: dict | None = None) -> list[str]:
+        """Argv for this run.
+
+        ``config`` is the mapping ``build_config`` returned for this dispatch.
+        It is passed because not every engine takes its configuration through
+        the environment: OpenCode reads a JSON blob from
+        ``OPENCODE_CONFIG_CONTENT`` and ignores this, while Claude Code takes
+        its settings, system prompt and tool list as command-line arguments.
+        A runner that needs it must REFUSE when it is None rather than rebuild
+        it — a rebuild cannot see the run's ``--permissions`` profile, and
+        dispatching with quietly different rules than the operator asked for is
+        worse than failing.
+        """
+
+    def working_directory(self, workdir: Path) -> Path | None:
+        """The cwd this engine's process needs, or None to leave it alone.
+
+        Default None: OpenCode is told where to work with `--dir` and inherits
+        whatever cwd the dispatcher had. An engine that takes its workspace
+        from `process.cwd()` must return `workdir` here — otherwise the worker
+        runs in pw9's own dispatch cwd, which lives under `$PILOT_WORKERS_HOME`
+        and is therefore inside the credential-path deny. Found the hard way:
+        the first end-to-end run reported the project as empty and every read
+        as "denied by your permission settings".
+        """
+        return None
+
+    def apply_credential(self, env: dict[str, str], secret: str) -> None:
+        """Place the provider credential into the child environment.
+
+        Default: nothing — an engine that reads a credential FILE (OpenCode)
+        needs no environment entry, and the sandbox symlink has already put the
+        file where it looks. Overridden by engines that authenticate from the
+        environment instead. Called by ``cli/run`` with the key it has already
+        read, after ``build_environment``.
+        """
 
     @abstractmethod
     def runner_environment(self, provider: Any, config: dict,

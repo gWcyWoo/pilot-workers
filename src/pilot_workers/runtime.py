@@ -37,7 +37,10 @@ SAFE_ENV_KEYS = (
 # the user exported in their shell into every orchestrator process, where a
 # core dump or /proc/<pid>/environ exposes it — for no benefit, since the
 # worker's own environment is rebuilt from SAFE_ENV_KEYS regardless.
-ORCHESTRATOR_ENV_KEYS = SAFE_ENV_KEYS + ("PILOT_WORKERS_HOME", "CODEX_HOME")
+# CODEX_HOME is deliberately absent: it is no longer read by pilot_home(), and
+# forwarding it would let a stale export silently redirect a child's idea of
+# the root while this process used another.
+ORCHESTRATOR_ENV_KEYS = SAFE_ENV_KEYS + ("PILOT_WORKERS_HOME",)
 
 # Env keys a runner must never override: neutral SAFE_ENV_KEYS already owned
 # by this layer, the XDG_*_HOME dirs (also owned here), plus the NO_COLOR / CI
@@ -364,6 +367,34 @@ def release_run_lock(root: Path) -> None:
         pass
 
 
+def _link_to(link: Path, target: Path) -> None:
+    """Make ``link`` a symlink to ``target``, repairing a wrong or broken one.
+
+    Creating it only when absent was not enough, twice over. ``exists()``
+    follows the link, so a DANGLING link reads as absent and ``os.symlink``
+    then raises FileExistsError — the reason the old code tested
+    ``is_symlink()`` as well. But that pair also SKIPS a link that exists and
+    points at the wrong place, which is what a relocated data root leaves
+    behind: every sandbox provisioned before the move still names the old
+    path, so the engine finds no credential while ``status`` — which reads the
+    canonical file, not the link — happily reports the provider as configured.
+
+    Retargeting is a symlink swap: nothing the link points AT is touched.
+    """
+    if link.is_symlink():
+        if os.readlink(link) == str(target):
+            return
+        # Swap through a temp name so the link is never missing, even if this
+        # process dies between the two steps.
+        temporary = link.with_name(link.name + ".relink.tmp")
+        temporary.unlink(missing_ok=True)
+        os.symlink(str(target), str(temporary))
+        os.replace(temporary, link)
+        return
+    if not link.exists():
+        os.symlink(str(target), str(link))
+
+
 def provision_run_sandbox(provider: Provider, run_id: str, runner: Runner) -> dict[str, Path]:
     """Provision a per-run sandbox and hold its lock.
 
@@ -386,18 +417,12 @@ def provision_run_sandbox(provider: Provider, run_id: str, runner: Runner) -> di
             ensure_private_directory(paths[name])
         shared_cache = profile_paths(provider)["cache"]
         ensure_private_directory(shared_cache)
-        # `exists()` follows the link, so a DANGLING cache symlink reads as
-        # absent and os.symlink then raises FileExistsError. The auth link six
-        # lines below already checks both; this is the same guard, which is the
-        # seventh sibling site this session.
-        if not paths["cache"].exists() and not paths["cache"].is_symlink():
-            os.symlink(str(shared_cache), str(paths["cache"]))
+        _link_to(paths["cache"], shared_cache)
         # WHERE the credential goes inside the sandbox is the runner's business
         # (it must match where the engine looks); creating the link is ours.
         auth_link = runner.sandbox_credential_path(paths)
         auth_link.parent.mkdir(parents=True, exist_ok=True)
-        if not auth_link.exists() and not auth_link.is_symlink():
-            os.symlink(str(runner.credential_path(provider)), str(auth_link))
+        _link_to(auth_link, runner.credential_path(provider))
     except Exception:
         release_run_lock(paths["root"])
         raise
@@ -588,6 +613,7 @@ class RunResult:
     timed_out: bool = False
     idle_timed_out: bool = False
     interrupted: bool = False
+    step_capped: bool = False
 
 
 class _SafeRenderer:
@@ -634,13 +660,32 @@ def run_process(
     command: list[str], env: dict[str, str], task: str,
     log_path: Path, stderr_path: Path, secret: str,
     renderer: Any = None, timeout_s: int = 0, idle_timeout_s: int = 0,
-    runner: Runner | None = None,
+    runner: Runner | None = None, max_steps: int = 0,
+    cwd: Path | None = None,
 ) -> RunResult:
+    """Run the worker, streaming its events, bounded three ways.
+
+    ``max_steps`` is the read-side step cap: once that many ``kind="step"``
+    events have been translated, the child is terminated exactly as a timeout
+    terminates it. It exists because not every engine can be told to stop
+    itself — Claude Code's CLI has no turn limit — so the cap ``STEPS_BY_MODE``
+    promises has to be enforceable from out here. For an engine that DOES
+    hard-stop (OpenCode's `steps` option) this is a redundant outer bound that
+    never fires first, which is the right relationship between the two.
+
+    ``0`` disables it, like the timeouts.
+
+    ``cwd`` is the child's working directory, from
+    ``Runner.working_directory``. None keeps the caller's, which is right for
+    an engine told where to work by a flag.
+    """
     safe_renderer = _SafeRenderer(renderer)
     result = RunResult(exit_code=1, session_id=None)
     last_activity = time.monotonic()
     started_at = last_activity
     lock = threading.Lock()
+    steps_seen = 0
+    step_cap_hit = False
 
     def redact(value: str) -> str:
         # Same floor as redact_secrets and taskguard: below it a "secret" occurs
@@ -654,6 +699,7 @@ def run_process(
         process = subprocess.Popen(
             command, env=env, stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
+            cwd=str(cwd) if cwd is not None else None,
         )
 
         def feed_stdin() -> None:
@@ -687,6 +733,16 @@ def run_process(
                     for ev in runner.parse_events(event):
                         if ev.kind == "session" and ev.session_id:
                             result.session_id = ev.session_id
+                        elif ev.kind == "step" and max_steps:
+                            # Counted here rather than in the poll loop because
+                            # this is the only place events are translated. The
+                            # kill itself is left to the loop below, which owns
+                            # stop_child and the exit-code bookkeeping.
+                            nonlocal steps_seen, step_cap_hit
+                            with lock:
+                                steps_seen += 1
+                                if steps_seen >= max_steps:
+                                    step_cap_hit = True
                 except Exception:
                     pass
 
@@ -730,7 +786,14 @@ def run_process(
                 now = time.monotonic()
                 with lock:
                     silent = now - last_activity
+                    capped = step_cap_hit
                 elapsed = now - started_at
+                if capped:
+                    # Checked before the timeouts: a run that reached its step
+                    # cap must be reported as capped, not as whichever bound
+                    # happened to trip in the same second.
+                    result.step_capped = True; stop_child()
+                    result.exit_code = process.returncode or 124; break
                 if timeout_s and elapsed >= timeout_s:
                     result.timed_out = True; stop_child()
                     result.exit_code = process.returncode or 124; break
@@ -748,6 +811,7 @@ def run_process(
             for thread in threads:
                 thread.join(timeout=5)
 
-    if (result.timed_out or result.idle_timed_out or result.interrupted) and result.exit_code == 0:
+    if (result.timed_out or result.idle_timed_out or result.interrupted
+            or result.step_capped) and result.exit_code == 0:
         result.exit_code = 124
     return result

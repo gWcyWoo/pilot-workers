@@ -20,6 +20,11 @@ Optional fields, each defaulting to the behaviour that existed before it did:
 
 ```yaml
 permissions: <profile-name>         # a profile from data/permissions/
+runner: claude-code                 # execution engine; default `opencode`.
+                                    #   `claude-code` drives the `claude` CLI
+                                    #   headless, so base_url must be the
+                                    #   vendor's ANTHROPIC-compatible endpoint
+                                    #   and provider_id/npm/declare are unused
 npm: <package>                      # default @ai-sdk/openai-compatible
 declare: false                      # the engine's registry already knows
                                     #   provider_id (openai, anthropic) and

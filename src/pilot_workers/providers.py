@@ -249,10 +249,67 @@ def load_providers(providers_dir: Path | None = None) -> dict[str, Provider]:
     return providers
 
 
+# Where this tool's data used to live: inside the Codex CLI's own home. That
+# was never a directory pw9 owned — `~/.codex` holds Codex's `auth.json`,
+# `config.toml`, `sessions` and `skills` — and pw9's run sandboxes grew to tens
+# of gigabytes inside it. The name is kept only to recognise an old install and
+# say so; nothing is ever read from it.
+_LEGACY_HOME = ".codex"
+_LEGACY_MARKER = "opencode-workers"
+
+PILOT_HOME_DIRNAME = ".pilot-workers"
+
+
 def pilot_home() -> Path:
-    """Root for all pilot-workers runtime data (credentials, logs, worktrees)."""
-    return Path(os.environ.get("PILOT_WORKERS_HOME",
-                os.environ.get("CODEX_HOME", Path.home() / ".codex"))).expanduser().resolve()
+    """Root for all pilot-workers runtime data (credentials, logs, worktrees).
+
+    ``$PILOT_WORKERS_HOME`` overrides it; otherwise ``~/.pilot-workers``.
+
+    ``$CODEX_HOME`` is deliberately NOT consulted. It used to be, which put
+    every credential, log and run sandbox inside the Codex CLI's home
+    directory — a directory belonging to a different tool, which pw9's own
+    reapers and 0700 chmods then operated on.
+    """
+    override = os.environ.get("PILOT_WORKERS_HOME")
+    if override:
+        return Path(override).expanduser().resolve()
+    return (Path.home() / PILOT_HOME_DIRNAME).expanduser().resolve()
+
+
+def legacy_home_notice() -> str | None:
+    """The migration instructions, or None when there is nothing to migrate.
+
+    Deliberately NOT raised from ``pilot_home``. That helper runs during import
+    (``PROVIDERS`` merges user overrides at module load), so raising there
+    aborts ``import pilot_workers.cli.status`` itself and the operator gets a
+    traceback with the message buried at the bottom — which is how the built
+    wheel failed the first time this was tried. ``cli.main`` calls this once,
+    before dispatching, and prints it as an ordinary error.
+
+    Answering with a fresh empty root and saying nothing is the other wrong
+    answer: `status` would report every credential missing with no clue why.
+    """
+    if os.environ.get("PILOT_WORKERS_HOME"):
+        return None
+    home = Path.home()
+    root = home / PILOT_HOME_DIRNAME
+    legacy = home / _LEGACY_HOME
+    if root.exists() or not (legacy / _LEGACY_MARKER).is_dir():
+        return None
+    moves = " ".join(
+        name for name in ("providers", _LEGACY_MARKER, "permissions",
+                          "strategies", "dispatch-cwd", "runner-versions.json",
+                          "worker-runtime")
+        if (legacy / name).exists()
+    )
+    return (
+        f"pilot-workers data now lives in {root}, not in the Codex CLI's home "
+        f"({legacy}). Move this install's own directories across — and only "
+        f"these, the rest of {legacy} belongs to Codex:\n"
+        f"    mkdir -p {root} && chmod 700 {root}\n"
+        f"    cd {legacy} && mv {moves} {root}/\n"
+        f"Or keep the old location by setting PILOT_WORKERS_HOME={legacy}."
+    )
 
 
 def user_providers_dir() -> Path:
@@ -294,11 +351,11 @@ def reload_providers() -> dict[str, Provider]:
     """Re-resolve PROVIDERS against the CURRENT pilot home, in place.
 
     The user-override layer is read at import, so a process that changes
-    ``PILOT_WORKERS_HOME``/``CODEX_HOME`` afterwards keeps whatever home was
+    ``PILOT_WORKERS_HOME`` afterwards keeps whatever home was
     in effect when this module first loaded. That is right for a normal run
     (one home, imported once) and wrong for the test suite, which redirects
     the home per test AFTER import — without this, every test would see the
-    developer's own ``~/.codex/providers/`` and pass or fail on their
+    developer's own ``~/.pilot-workers/providers/`` and pass or fail on their
     personal config.
 
     Mutates the existing dict rather than rebinding: callers do
